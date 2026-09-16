@@ -499,6 +499,31 @@ fn test_initialize_worktree_no_config() {
 }
 
 #[test]
+fn test_initialize_worktree_copies_omp_project_config() {
+    let temp_dir = setup_git_repo();
+    let omp_dir = temp_dir.path().join(".omp");
+    std::fs::create_dir_all(omp_dir.join("skills/project-skill")).unwrap();
+    std::fs::write(omp_dir.join("mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
+    std::fs::write(
+        omp_dir.join("skills/project-skill/SKILL.md"),
+        "# Project skill",
+    )
+    .unwrap();
+
+    let worktree_path = git::create_worktree(temp_dir.path(), "init-omp").unwrap();
+    let warnings = git::initialize_worktree(temp_dir.path(), &worktree_path, None, None, &[]);
+
+    assert!(warnings.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(worktree_path.join(".omp/mcp.json")).unwrap(),
+        r#"{"mcpServers":{}}"#
+    );
+    assert!(worktree_path
+        .join(".omp/skills/project-skill/SKILL.md")
+        .exists());
+}
+
+#[test]
 fn test_initialize_worktree_copy_files() {
     let temp_dir = setup_git_repo();
     std::fs::write(temp_dir.path().join(".env"), "DB_URL=localhost").unwrap();

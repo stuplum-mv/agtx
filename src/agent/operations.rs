@@ -4,7 +4,8 @@
 //! like Claude Code, Aider, Codex, etc.
 
 use anyhow::Result;
-use std::collections::HashMap;
+use crate::config::AgentProfileConfig;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -92,7 +93,7 @@ impl AgentOperations for CodingAgent {
     }
 
     fn build_orchestrator_command(&self, mcp_json: &str, _agtx_bin: &str) -> String {
-        match self.agent.name.as_str() {
+        match self.agent.base_name() {
             // Register under a unique name (`agtx-orchestrator`) rather than
             // `agtx` to avoid colliding with an `agtx` server already defined in
             // another scope (the Claude Code plugin's `plugin:agtx:agtx`, a
@@ -142,9 +143,21 @@ pub struct RealAgentRegistry {
 }
 
 impl RealAgentRegistry {
-    /// Create a new registry populated with all available agents.
-    /// `default_name` is used as the fallback when a requested name isn't found.
+    /// Create a registry populated with built-in agents only.
+    /// `default_name` is used as the fallback when a requested name is absent.
     pub fn new(default_name: &str) -> Self {
+        Self::with_profiles(default_name, &BTreeMap::new())
+    }
+
+    /// Create a registry with named instances layered over the built-in agents.
+    ///
+    /// Profiles with an unknown base, or names colliding with built-in agents,
+    /// are ignored. Every valid named instance is registered deterministically;
+    /// binary availability is a UI concern and is checked only when launched.
+    pub fn with_profiles(
+        default_name: &str,
+        profiles: &BTreeMap<String, AgentProfileConfig>,
+    ) -> Self {
         let mut agents: HashMap<String, Arc<dyn AgentOperations>> = HashMap::new();
 
         for agent in super::known_agents() {
@@ -154,20 +167,54 @@ impl RealAgentRegistry {
             }
         }
 
-        // Ensure we have the default agent even if not detected as available
+        for (instance_name, profile) in profiles {
+            if super::get_agent(instance_name).is_some() {
+                continue;
+            }
+            let Some(base) = super::get_agent(&profile.agent) else {
+                continue;
+            };
+            // Registration is configuration resolution, not binary detection. A phase
+            // alias must retain its own flags even on a machine where the binary is
+            // currently absent; launch will then fail normally instead of silently
+            // falling back to a different configured instance.
+            let configured = super::Agent::named(
+                instance_name,
+                &base,
+                profile.profile.clone(),
+                profile.model.clone(),
+            );
+            agents.insert(
+                instance_name.clone(),
+                Arc::new(CodingAgent::new(configured)),
+            );
+        }
+
+        // Keep the configured built-in default even when it is not installed.
         if !agents.contains_key(default_name) {
             if let Some(agent) = super::get_agent(default_name) {
                 agents.insert(default_name.to_string(), Arc::new(CodingAgent::new(agent)));
             }
         }
 
-        Self {
-            agents,
-            default_name: default_name.to_string(),
-        }
+        // A missing/invalid named default must not leave get() with a panic path.
+        let default_name = if agents.contains_key(default_name) {
+            default_name.to_string()
+        } else {
+            let fallback = super::known_agents()
+                .into_iter()
+                .next()
+                .expect("at least one built-in agent spec");
+            let name = fallback.name.clone();
+            agents
+                .entry(name.clone())
+                .or_insert_with(|| Arc::new(CodingAgent::new(fallback)));
+            name
+        };
+
+        Self { agents, default_name }
     }
 }
-
 impl AgentRegistry for RealAgentRegistry {
     fn get(&self, agent_name: &str) -> Arc<dyn AgentOperations> {
         self.agents.get(agent_name).cloned().unwrap_or_else(|| {
@@ -176,5 +223,51 @@ impl AgentRegistry for RealAgentRegistry {
                 .cloned()
                 .expect("Default agent must exist in registry")
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_registers_valid_profiles_and_ignores_invalid_bases() {
+        let profiles = BTreeMap::from([
+            (
+                "omp-work".to_string(),
+                AgentProfileConfig {
+                    agent: "omp".to_string(),
+                    profile: Some("work".to_string()),
+                    model: Some("openai/gpt 5".to_string()),
+                },
+            ),
+            (
+                "broken".to_string(),
+                AgentProfileConfig {
+                    agent: "missing".to_string(),
+                    profile: None,
+                    model: None,
+                },
+            ),
+        ]);
+        let registry = RealAgentRegistry::with_profiles("omp-work", &profiles);
+
+        assert_eq!(
+            registry.get("omp-work").build_resume_command(),
+            "omp --profile 'work' --model 'openai/gpt 5' --auto-approve --continue"
+        );
+        assert_eq!(
+            registry.get("broken").build_resume_command(),
+            registry.get("omp-work").build_resume_command()
+        );
+    }
+
+    #[test]
+    fn invalid_default_falls_back_without_panicking() {
+        let registry = RealAgentRegistry::with_profiles("missing", &BTreeMap::new());
+        assert_eq!(
+            registry.get("also-missing").build_interactive_command(""),
+            "claude --dangerously-skip-permissions"
+        );
     }
 }

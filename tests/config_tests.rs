@@ -1,3 +1,4 @@
+use agtx::agent::{AgentRegistry, RealAgentRegistry};
 use agtx::config::{
     determine_first_run_action, FirstRunAction, GlobalConfig, MergedConfig, PhaseAgentsConfig,
     ProjectConfig, ThemeConfig, WorktreeConfig,
@@ -106,6 +107,7 @@ fn test_merged_config_project_overrides() {
     let project = ProjectConfig {
         default_agent: Some("codex".to_string()),
         agents: None,
+        agent_profiles: None,
         base_branch: Some("develop".to_string()),
         worktree_dir: None,
         github_url: Some("https://github.com/user/repo".to_string()),
@@ -812,4 +814,166 @@ fn a_project_config_overrides_the_global_default_agent() {
         MergedConfig::merge(&global, &ProjectConfig::default()).default_agent,
         "opencode"
     );
+}
+
+// === Named agent profile tests ===
+
+#[test]
+fn named_omp_phase_profiles_parse_and_resolve_to_base_agent() {
+    let global: GlobalConfig = toml::from_str(
+        r#"
+default_agent = "omp-default"
+
+[agents]
+research = "omp-research"
+planning = "omp-planning"
+running = "omp-running"
+review = "omp-review"
+
+[agent_profiles.omp-default]
+agent = "omp"
+
+[agent_profiles.omp-research]
+agent = "omp"
+profile = "agtx-research"
+model = "cursor/gpt-5.6-sol:high"
+
+[agent_profiles.omp-planning]
+agent = "omp"
+profile = "agtx-planning"
+
+[agent_profiles.omp-running]
+agent = "omp"
+profile = "agtx-running"
+
+[agent_profiles.omp-review]
+agent = "omp"
+profile = "agtx-review"
+"#,
+    )
+    .unwrap();
+
+    let merged = MergedConfig::merge(&global, &ProjectConfig::default());
+    for phase in ["research", "planning", "running", "review"] {
+        let instance = merged.agent_for_phase(phase);
+        assert!(instance.starts_with("omp-"), "{phase}: {instance}");
+        assert_eq!(merged.base_agent_name(instance), "omp", "{phase}");
+    }
+    assert_eq!(merged.default_agent, "omp-default");
+    assert_eq!(merged.base_agent_name(&merged.default_agent), "omp");
+}
+
+#[test]
+fn phase_specific_omp_profiles_build_their_own_start_and_resume_commands() {
+    let global: GlobalConfig = toml::from_str(
+        r#"
+default_agent = "omp-default"
+
+[agents]
+research = "omp-research"
+review = "omp-review"
+
+[agent_profiles.omp-default]
+agent = "omp"
+
+[agent_profiles.omp-research]
+agent = "omp"
+profile = "research profile"
+model = "cursor/research model"
+
+[agent_profiles.omp-review]
+agent = "omp"
+profile = "review profile"
+model = "cursor/review model"
+"#,
+    )
+    .unwrap();
+
+    let merged = MergedConfig::merge(&global, &ProjectConfig::default());
+    let registry =
+        RealAgentRegistry::with_profiles(&merged.default_agent, &merged.agent_profiles);
+
+    let research = registry.get(merged.agent_for_phase("research"));
+    assert_eq!(
+        research.build_interactive_command("investigate"),
+        "omp --profile 'research profile' --model 'cursor/research model' --auto-approve 'investigate'"
+    );
+    assert_eq!(
+        research.build_resume_command(),
+        "omp --profile 'research profile' --model 'cursor/research model' --auto-approve --continue"
+    );
+
+    let review = registry.get(merged.agent_for_phase("review"));
+    assert_eq!(
+        review.build_interactive_command("review"),
+        "omp --profile 'review profile' --model 'cursor/review model' --auto-approve 'review'"
+    );
+    assert_eq!(
+        review.build_resume_command(),
+        "omp --profile 'review profile' --model 'cursor/review model' --auto-approve --continue"
+    );
+}
+
+#[test]
+fn plugin_compatibility_uses_a_named_profiles_base_identity() {
+    let global: GlobalConfig = toml::from_str(
+        r#"
+default_agent = "omp-review"
+[agent_profiles.omp-review]
+agent = "omp"
+profile = "review"
+"#,
+    )
+    .unwrap();
+    let merged = MergedConfig::merge(&global, &ProjectConfig::default());
+    let plugin: WorkflowPlugin = toml::from_str(
+        r#"
+name = "ai-rules"
+supported_agents = ["omp"]
+"#,
+    )
+    .unwrap();
+
+    assert!(!plugin.supports_agent("omp-review"));
+    assert!(plugin.supports_agent(
+        merged.base_agent_name("omp-review")
+    ));
+}
+
+#[test]
+fn invalid_or_missing_profile_references_fall_back_without_shadowing_builtins() {
+    let global: GlobalConfig = toml::from_str(
+        r#"
+default_agent = "omp-default"
+
+[agents]
+running = "missing-profile"
+review = "invalid-profile"
+
+[agent_profiles.omp-default]
+agent = "omp"
+
+[agent_profiles.invalid-profile]
+agent = "not-a-supported-agent"
+
+[agent_profiles.claude]
+agent = "omp"
+"#,
+    )
+    .unwrap();
+    let merged = MergedConfig::merge(&global, &ProjectConfig::default());
+
+    assert_eq!(merged.agent_for_phase("running"), "omp-default");
+    assert_eq!(merged.agent_for_phase("review"), "omp-default");
+    assert_eq!(merged.base_agent_name("missing-profile"), "omp");
+    assert_eq!(merged.base_agent_name("invalid-profile"), "omp");
+    assert_eq!(merged.base_agent_name("claude"), "claude");
+
+    let invalid_default: GlobalConfig = toml::from_str(
+        r#"default_agent = "missing-profile""#,
+    )
+    .unwrap();
+    let merged = MergedConfig::merge(&invalid_default, &ProjectConfig::default());
+    assert_eq!(merged.agent_for_phase("planning"), "claude");
+    assert_eq!(merged.base_agent_name("missing-profile"), "claude");
 }

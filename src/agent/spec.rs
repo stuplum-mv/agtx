@@ -58,10 +58,10 @@ pub enum CommandSyntax {
     Hyphen,
     /// `$ns-command` — Codex's inline skill reference.
     Dollar,
-    /// `/skill:ns-command` — pi's skill commands live in one `skill:` namespace
-    /// of their own, so the plugin's namespace collapses into the skill *name*
+    /// `/skill:ns-command` — OMP and pi skills live in one `skill:` namespace,
+    /// so the plugin's namespace collapses into the skill *name*
     /// (`/agtx:plan` → `/skill:agtx-plan`) rather than staying a prefix.
-    /// Verified against pi 0.84.3.
+    /// Verified against OMP 18.2.0 and pi 0.84.3.
     PiSkill,
     /// No interactive skill invocation; callers fall back to a file-path
     /// reference. Copilot, and any agent agtx has not been taught.
@@ -145,8 +145,7 @@ pub enum SendStrategy {
 
 /// Where and how an agent's project-scoped MCP server config is written.
 ///
-/// Seven variants for seven agents, which looks untidy and is: the formats
-/// genuinely differ (JSON vs TOML, `mcpServers` vs `mcp_servers` vs `mcp`). What
+/// The variants look untidy because the formats genuinely differ (JSON vs TOML, `mcpServers` vs `mcp_servers` vs `mcp`). What
 /// the enum buys is that the mess lives in one function instead of a 170-line
 /// match inside `write_skills_to_worktree`, and that the names now say *why* the
 /// arms differ.
@@ -173,6 +172,8 @@ pub enum McpConfigKind {
     AntigravityJsonMerge,
     /// `opencode.json`, whose key is `mcp` and whose entry shape differs.
     OpenCode,
+    /// `.omp/mcp.json` — parsed and merged so project-local servers survive.
+    OmpJsonMerge,
     /// `.pi/mcp.json` — parsed, agtx inserted, written back, so other servers
     /// survive. pi has no MCP client of its own; the `pi-mcp-adapter` package
     /// reads this path as its highest-precedence project layer, and without the
@@ -188,7 +189,7 @@ pub enum McpConfigKind {
 /// the worktree and never into the user's global agent config. Removing the
 /// worktree removes the registration.
 ///
-/// `hook_config: None` — opencode, copilot — keeps the pane-hash heuristic,
+/// `hook_config: None` — OMP, opencode, copilot — keeps the pane-hash heuristic,
 /// which is a supported state, not a degraded one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookConfigKind {
@@ -252,6 +253,9 @@ pub struct AgentSpec {
     /// Environment assignments prefixed to the interactive launch command.
     /// Not applied to the headless invocation, which never touches the workspace.
     pub env: &'static [(&'static str, &'static str)],
+    /// Optional CLI flags accepted before unattended/headless arguments.
+    pub profile_flag: Option<&'static str>,
+    pub model_flag: Option<&'static str>,
     /// Flags that make the agent run unattended (permission bypass, sandbox mode).
     pub base_args: &'static [&'static str],
     pub prompt_form: PromptForm,
@@ -349,6 +353,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // ANTHROPIC_API_KEY or apiKeyHelper". Verified 2.1.246.
         api_key_env: &["ANTHROPIC_API_KEY"],
         env: &[],
+        profile_flag: None,
+        model_flag: None,
         base_args: &["--dangerously-skip-permissions"],
         prompt_form: PromptForm::Argv,
         // Verified against claude 2.1.241: `claude [prompt]` starts an
@@ -441,6 +447,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // is the only headless path.
         api_key_env: &["OPENAI_API_KEY", "CODEX_API_KEY"],
         env: &[],
+        profile_flag: None,
+        model_flag: None,
         base_args: &["--sandbox", "workspace-write"],
         prompt_form: PromptForm::Argv,
         // Verified against codex-cli 0.144.5: `codex --sandbox workspace-write
@@ -535,6 +543,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // GH_TOKEN. Fill it in from the real binary, not from documentation.
         api_key_env: &[],
         env: &[],
+        profile_flag: None,
+        model_flag: None,
         base_args: &["--allow-all-tools"],
         // `-i` keeps the session interactive; `-p` is print mode and exits on
         // completion, which killed every copilot task until it was fixed.
@@ -581,6 +591,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // folder". The variable is kept because it is untested for the *other*
         // things it may gate, but it is not what grants the inheritance.
         env: &[("GEMINI_TRUST_WORKSPACE", "true")],
+        profile_flag: None,
+        model_flag: None,
         base_args: &["--approval-mode", "yolo"],
         prompt_form: PromptForm::Flag("-i"),
         // Verified against gemini 0.46.0: `gemini … -i '<prompt>'` delivers the
@@ -631,6 +643,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
             "GOOGLE_GENERATIVE_AI_API_KEY",
         ],
         env: &[],
+        profile_flag: None,
+        model_flag: None,
         base_args: &[],
         // `--prompt`, not `-p`: opencode has no `-p` short form at all, so the
         // previous value would have failed the moment it was used. Verified
@@ -671,6 +685,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // var)". Verified 2026.08.11.
         api_key_env: &["CURSOR_API_KEY"],
         env: &[],
+        profile_flag: None,
+        model_flag: None,
         // `--trust` is "trust the current workspace without prompting". It is not
         // an escalation on top of `--yolo`, which already auto-runs every tool —
         // refusing the narrower flag while passing the broader one would be
@@ -729,6 +745,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // export XAI_API_KEY=...". The clearest headless story of any agent here.
         api_key_env: &["XAI_API_KEY"],
         env: &[],
+        profile_flag: None,
+        model_flag: None,
         // `--trust` also ungates the repo-local `.grok/config.toml` MCP server
         // and suppresses the directory-trust dialog.
         base_args: &["--yolo", "--trust"],
@@ -770,6 +788,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // until someone authenticates a fresh `agy` with the variable alone.
         api_key_env: &[],
         env: &[],
+        profile_flag: None,
+        model_flag: None,
         // Two orthogonal controls: the flag governs shell/MCP/URL approvals,
         // `--mode` governs the file-edit diff review. Both are needed to run
         // unattended.
@@ -836,6 +856,49 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         ],
     },
     AgentSpec {
+        name: "omp",
+        binary: "omp",
+        description: "Oh My Pi coding agent",
+        co_author: "Oh My Pi <noreply@oh-my-pi.dev>",
+        // OMP is provider-agnostic. The selected model decides which credential is consumed.
+        api_key_env: &[
+            "CURSOR_ACCESS_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+        ],
+        env: &[],
+        // Verified against omp 18.2.0; selection flags precede unattended flags.
+        profile_flag: Some("--profile"),
+        model_flag: Some("--model"),
+        base_args: &["--auto-approve"],
+        prompt_form: PromptForm::Argv,
+        launch_prompt_verified: true,
+        resume: ResumeArgs::Append(&["--continue"]),
+        // One-shot generation must not replace the latest resumable session in this profile.
+        headless_args: &["--auto-approve", "--no-session", "--print"],
+        // Native project discovery walks up through `.omp`; skills are `/skill:<name>`.
+        skill_dir: Some((".omp/skills", "")),
+        skill_layout: SkillLayout::SkillDir,
+        skill_scan_dir: Some(".omp/skills"),
+        command_syntax: CommandSyntax::PiSkill,
+        mcp_config: Some(McpConfigKind::OmpJsonMerge),
+        // OMP hooks are executable JS/TS modules, not a safely mergeable command config.
+        hook_config: None,
+        hook_event_source: HookEventSource::Payload,
+        process_names: &["omp"],
+        active_indicators: &[],
+        // OMP 18.2.0 has the same always-visible context footer as Pi. Keep this
+        // scoped because "%/" is too broad to match in unrelated panes.
+        scoped_indicators: &["%/"],
+        exit_command: Some("/exit"),
+        label_fg: (113, 214, 184),
+        label_bg: None,
+        send_strategy: SendStrategy::Combined,
+        clear_context_command: None,
+        dialogs: &[],
+    },
+    AgentSpec {
         name: "pi",
         binary: "pi",
         description: "Earendil's pi coding agent",
@@ -848,6 +911,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // Verified against pi 0.84.3 (docs/providers.md).
         api_key_env: &["GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
         env: &[],
+        profile_flag: None,
+        model_flag: None,
         // pi ships no permission system, so there is no --yolo equivalent and
         // none is needed. What does block an unattended start is the project
         // trust prompt, which fires in any directory carrying project-local
@@ -963,6 +1028,19 @@ pub fn can_launch_with_prompt(injection: crate::agent::PromptInjection, text: &s
 }
 
 pub fn compose_command(spec: &AgentSpec, args: &[&str], prompt: Option<&str>) -> String {
+    compose_command_with_options(spec, args, prompt, None, None)
+}
+
+/// Compose an interactive command with instance-level profile/model selection.
+/// Dynamic values are shell words. Headless callers pass the same values as
+/// separate argv elements and avoid shell parsing entirely.
+pub fn compose_command_with_options(
+    spec: &AgentSpec,
+    args: &[&str],
+    prompt: Option<&str>,
+    profile: Option<&str>,
+    model: Option<&str>,
+) -> String {
     let mut out = String::new();
     for (key, value) in spec.env {
         out.push_str(key);
@@ -971,6 +1049,14 @@ pub fn compose_command(spec: &AgentSpec, args: &[&str], prompt: Option<&str>) ->
         out.push(' ');
     }
     out.push_str(spec.binary);
+    for (flag, value) in [(spec.profile_flag, profile), (spec.model_flag, model)] {
+        if let (Some(flag), Some(value)) = (flag, value) {
+            out.push(' ');
+            out.push_str(flag);
+            out.push(' ');
+            out.push_str(&shell_quote(value));
+        }
+    }
     for arg in args {
         out.push(' ');
         out.push_str(arg);
@@ -980,14 +1066,14 @@ pub fn compose_command(spec: &AgentSpec, args: &[&str], prompt: Option<&str>) ->
             out.push(' ');
             out.push_str(flag);
         }
-        // POSIX single-quote escaping: close, emit a literal quote, reopen. The
-        // whole command is itself wrapped in `sh -c '…'` by create_window, so a
-        // bare quote here would end that outer word and let the shell interpret
-        // the rest of the task as code.
-        let prompt = normalize_prompt(prompt);
-        out.push_str(&format!(" '{}'", prompt.replace('\'', "'\"'\"'")));
+        out.push(' ');
+        out.push_str(&shell_quote(&normalize_prompt(prompt)));
     }
     out
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
@@ -1057,5 +1143,30 @@ mod tests {
                 entry.name
             );
         }
+    }
+
+    #[test]
+    fn omp_is_distinct_from_earendil_pi() {
+        let omp = spec("omp").unwrap();
+        let pi = spec("pi").unwrap();
+
+        assert_eq!(omp.binary, "omp");
+        assert_eq!(omp.profile_flag, Some("--profile"));
+        assert_eq!(omp.model_flag, Some("--model"));
+        assert_eq!(omp.base_args, &["--auto-approve"]);
+        assert_eq!(
+            omp.headless_args,
+            &["--auto-approve", "--no-session", "--print"]
+        );
+        assert_eq!(omp.skill_dir, Some((".omp/skills", "")));
+        assert_eq!(omp.command_syntax, CommandSyntax::PiSkill);
+        assert_eq!(omp.mcp_config, Some(McpConfigKind::OmpJsonMerge));
+        assert_eq!(omp.process_names, &["omp"]);
+        assert!(omp.active_indicators.is_empty());
+        assert_eq!(omp.scoped_indicators, &["%/"]);
+        assert_eq!(omp.exit_command, Some("/exit"));
+        assert_eq!(omp.hook_config, None);
+        assert_ne!(omp.name, pi.name);
+        assert_ne!(omp.binary, pi.binary);
     }
 }

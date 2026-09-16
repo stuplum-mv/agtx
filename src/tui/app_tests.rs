@@ -1560,7 +1560,14 @@ fn test_delete_task_resources_full_cleanup() {
     task.worktree_path = Some("/tmp/worktree".to_string());
     task.branch_name = Some("task/abc-feature".to_string());
 
-    delete_task_resources(&task, None, Path::new("/project"), &mock_tmux, &mock_git);
+    delete_task_resources(
+        &task,
+        "claude",
+        None,
+        Path::new("/project"),
+        &mock_tmux,
+        &mock_git,
+    );
 }
 
 /// Test delete_task_resources handles task without resources
@@ -1576,7 +1583,14 @@ fn test_delete_task_resources_no_resources() {
     let task = Task::new("Simple task", "claude", "project-1");
     // No session_name, worktree_path, or branch_name
 
-    delete_task_resources(&task, None, Path::new("/project"), &mock_tmux, &mock_git);
+    delete_task_resources(
+        &task,
+        "claude",
+        None,
+        Path::new("/project"),
+        &mock_tmux,
+        &mock_git,
+    );
 }
 
 // =============================================================================
@@ -1912,6 +1926,7 @@ fn test_setup_task_worktree_success() {
         None,
         &None,
         "claude",
+        "claude",
         &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
@@ -1972,6 +1987,7 @@ fn test_setup_task_worktree_sets_task_fields() {
         Some("CLAUDE.md".to_string()),
         Some("./init.sh".to_string()),
         &None,
+        "claude",
         "claude",
         &vec!["claude".to_string()],
         &mock_tmux,
@@ -2049,6 +2065,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
         None,
         &None,
         "claude",
+        "claude",
         &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
@@ -2113,6 +2130,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
         None,
         &None,
         "claude",
+        "claude",
         &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
@@ -2172,6 +2190,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         None,
         None,
         &None,
+        "claude",
         "claude",
         &vec!["claude".to_string()],
         &mock_tmux,
@@ -2235,6 +2254,7 @@ fn test_setup_task_worktree_passes_init_config() {
         Some("CLAUDE.md,.env".to_string()),
         Some("./setup.sh".to_string()),
         &None,
+        "claude",
         "claude",
         &vec!["claude".to_string()],
         &mock_tmux,
@@ -3596,6 +3616,8 @@ fn test_pane_tail_ignores_trailing_blank_rows() {
 /// `%/` must stay out of it in both directions.
 #[test]
 fn test_flat_and_scoped_indicators_are_disjoint_for_pi() {
+    assert!(!flat_indicators_for(Some("omp")).contains(&"%/"));
+    assert!(scoped_indicators_for(Some("omp")).contains(&"%/"));
     assert!(!flat_indicators_for(Some("pi")).contains(&"%/"));
     assert!(scoped_indicators_for(Some("pi")).contains(&"%/"));
     // An unknown agent gets the flat list and no scoped strings at all.
@@ -5152,6 +5174,29 @@ fn test_write_skills_to_worktree_mcp_pi_preserves_existing_config() {
         "top-level sibling keys must survive: {content}"
     );
     assert!(v["mcpServers"]["agtx"]["command"].is_string());
+}
+
+#[test]
+fn test_write_skills_to_worktree_omp_preserves_existing_mcp_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    let omp_dir = dir.path().join(".omp");
+    std::fs::create_dir_all(&omp_dir).unwrap();
+    std::fs::write(
+        omp_dir.join("mcp.json"),
+        r#"{"mcpServers":{"other":{"command":"other"}},"somethingElse":true}"#,
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["omp"], false);
+
+    assert!(dir.path().join(".omp/skills/agtx-plan/SKILL.md").exists());
+    let content = std::fs::read_to_string(omp_dir.join("mcp.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(v["mcpServers"]["other"]["command"], "other", "{content}");
+    assert_eq!(v["somethingElse"], true, "{content}");
+    assert!(v["mcpServers"]["agtx"]["command"].is_string());
+    assert_eq!(v["mcpServers"]["agtx"]["args"][0], "mcp-serve");
 }
 
 #[test]
@@ -11528,7 +11573,14 @@ fn test_delete_task_resources_removes_worktree_without_a_branch() {
     task.worktree_path = Some("/tmp/wt".to_string());
     task.branch_name = None;
 
-    delete_task_resources(&task, None, Path::new("/tmp/proj"), &mock_tmux, &mock_git);
+    delete_task_resources(
+        &task,
+        "claude",
+        None,
+        Path::new("/tmp/proj"),
+        &mock_tmux,
+        &mock_git,
+    );
 }
 
 /// The converse is deliberately *not* symmetric. A task with a branch and no
@@ -11547,7 +11599,14 @@ fn test_delete_task_resources_keeps_branch_of_a_done_task() {
     task.worktree_path = None;
     task.branch_name = Some("task/finished".to_string());
 
-    delete_task_resources(&task, None, Path::new("/tmp/proj"), &mock_tmux, &mock_git);
+    delete_task_resources(
+        &task,
+        "claude",
+        None,
+        Path::new("/tmp/proj"),
+        &mock_tmux,
+        &mock_git,
+    );
 }
 
 #[test]
@@ -11574,7 +11633,14 @@ fn test_delete_task_resources_kills_window_removes_worktree_and_deletes_branch()
     task.worktree_path = Some("/tmp/wt".to_string());
     task.branch_name = Some("task/my-task".to_string());
 
-    delete_task_resources(&task, None, Path::new("/tmp/proj"), &mock_tmux, &mock_git);
+    delete_task_resources(
+        &task,
+        "claude",
+        None,
+        Path::new("/tmp/proj"),
+        &mock_tmux,
+        &mock_git,
+    );
 }
 
 #[test]
@@ -11585,7 +11651,14 @@ fn test_delete_task_resources_noop_when_no_session_or_worktree() {
 
     let task = make_test_task("t2", "Nothing to clean", TaskStatus::Backlog);
     // session_name and worktree_path both None → no mock calls
-    delete_task_resources(&task, None, Path::new("/tmp/proj"), &mock_tmux, &mock_git);
+    delete_task_resources(
+        &task,
+        "claude",
+        None,
+        Path::new("/tmp/proj"),
+        &mock_tmux,
+        &mock_git,
+    );
 }
 
 // --- save_task ---
@@ -14267,6 +14340,7 @@ fn test_agent_commands_derivation_matches_the_previous_literals() {
     got.sort_unstable();
     let mut want = vec![
         "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "agy",
+        "omp",
         // pi. Only fires on Linux — macOS fixes `p_comm` at exec, so the pane
         // reports `node` and pi's scoped indicator does the detecting there.
         // `node` itself must never join this list: it is every Ink agent's pane
@@ -14318,6 +14392,7 @@ fn test_exit_command_per_agent() {
         ("antigravity", Some("/exit")),
         ("gemini", Some("/quit")),
         ("grok", Some("/quit")),
+        ("omp", Some("/exit")),
         ("pi", Some("/quit")),
         ("codex", None),
         ("cursor", None),
@@ -14348,6 +14423,7 @@ fn test_send_strategy_per_agent() {
         ("codex", SendStrategy::Combined),
         ("cursor", SendStrategy::Combined),
         ("antigravity", SendStrategy::Combined),
+        ("omp", SendStrategy::Combined),
         ("pi", SendStrategy::Combined),
         ("opencode", SendStrategy::OpenCodePicker),
     ];
@@ -14368,6 +14444,7 @@ fn test_send_strategy_per_agent() {
 fn test_clear_context_command_per_agent() {
     let table = [
         ("claude", Some("/clear")),
+        ("omp", None),
         ("pi", Some("/new")),
         ("codex", None),
         ("gemini", None),

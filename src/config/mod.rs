@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Global configuration (stored in ~/.config/agtx/)
@@ -12,6 +13,10 @@ pub struct GlobalConfig {
     /// Per-phase agent overrides
     #[serde(default)]
     pub agents: PhaseAgentsConfig,
+
+    /// Named agent instances backed by a supported base agent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_profiles: BTreeMap<String, AgentProfileConfig>,
 
     /// Worktree settings
     #[serde(default)]
@@ -69,6 +74,7 @@ impl Default for GlobalConfig {
         Self {
             default_agent: default_agent(),
             agents: PhaseAgentsConfig::default(),
+            agent_profiles: BTreeMap::new(),
             worktree: WorktreeConfig::default(),
             theme: ThemeConfig::default(),
             fullscreen_on_enter: false,
@@ -198,6 +204,17 @@ pub struct PhaseAgentsConfig {
     pub review: Option<String>,
 }
 
+/// A named agent instance. The schema is generic so any AgentSpec can opt into
+/// profile/model flags without changing configuration again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentProfileConfig {
+    pub agent: String,
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 /// Worktree configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeConfig {
@@ -254,6 +271,10 @@ pub struct ProjectConfig {
 
     /// Per-phase agent overrides for this project
     pub agents: Option<PhaseAgentsConfig>,
+
+    /// Project entries replace same-named global instances.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_profiles: Option<BTreeMap<String, AgentProfileConfig>>,
 
     /// Override base branch for this project
     pub base_branch: Option<String>,
@@ -422,6 +443,12 @@ fn merge_table_named(
     name: Option<&str>,
 ) {
     for (key, item) in source.iter() {
+        // Profile keys are user-defined. Replace the map as one managed value so
+        // removing a profile does not leave its old table behind.
+        if name.is_none() && key == "agent_profiles" {
+            target.insert(key, item.clone());
+            continue;
+        }
         match (
             item.as_table(),
             target.get_mut(key).and_then(|i| i.as_table_mut()),
@@ -476,7 +503,7 @@ fn merge_table_named(
 /// Optional keys on `GlobalConfig`. Everything else it writes is required, so
 /// it is always re-emitted and can never need deleting.
 const GLOBAL_MANAGED: ManagedKeys = ManagedKeys {
-    root: &[],
+    root: &["agent_profiles"],
     nested: &[("agents", &["research", "planning", "running", "review"])],
 };
 
@@ -486,6 +513,7 @@ const PROJECT_MANAGED: ManagedKeys = ManagedKeys {
         // `agents` is itself optional here, so clearing it must drop the whole
         // `[agents]` section rather than leaving an empty header behind.
         "agents",
+        "agent_profiles",
         "default_agent",
         "base_branch",
         "github_url",
@@ -619,6 +647,7 @@ pub fn determine_first_run_action(
 pub struct MergedConfig {
     pub default_agent: String,
     pub phase_agents: PhaseAgentsConfig,
+    pub agent_profiles: BTreeMap<String, AgentProfileConfig>,
     pub worktree_enabled: bool,
     pub skip_worktree: bool,
     pub auto_cleanup: bool,
@@ -643,6 +672,10 @@ impl MergedConfig {
     /// Create merged config from global and project configs
     pub fn merge(global: &GlobalConfig, project: &ProjectConfig) -> Self {
         let project_agents = project.agents.clone().unwrap_or_default();
+        let mut agent_profiles = global.agent_profiles.clone();
+        if let Some(project_profiles) = &project.agent_profiles {
+            agent_profiles.extend(project_profiles.clone());
+        }
         Self {
             default_agent: project
                 .default_agent
@@ -654,6 +687,7 @@ impl MergedConfig {
                 running: project_agents.running.or(global.agents.running.clone()),
                 review: project_agents.review.or(global.agents.review.clone()),
             },
+            agent_profiles,
             worktree_enabled: global.worktree.enabled,
             skip_worktree: project.skip_worktree.unwrap_or(!global.worktree.enabled),
             auto_cleanup: global.worktree.auto_cleanup,
@@ -682,11 +716,53 @@ impl MergedConfig {
         }
     }
 
-    /// Get the agent name for a given phase.
-    /// Falls back to default_agent if no phase-specific override is set.
+    fn configured_base_agent_name<'a>(&'a self, instance_name: &'a str) -> Option<&'a str> {
+        // Built-in identities cannot be shadowed by a named profile. This matches
+        // RealAgentRegistry::with_profiles and prevents the UI from applying one
+        // agent's lifecycle behavior to another agent's process.
+        if crate::agent::spec(instance_name).is_some() {
+            return Some(instance_name);
+        }
+        self.agent_profiles.get(instance_name).and_then(|profile| {
+            crate::agent::spec(&profile.agent).map(|_| profile.agent.as_str())
+        })
+    }
+
+    /// Resolve an instance name to the base identity used by AgentSpec and plugin manifests.
+    /// Missing or invalid references follow the same default chain as the agent registry.
+    pub fn base_agent_name<'a>(&'a self, instance_name: &'a str) -> &'a str {
+        self.configured_base_agent_name(instance_name)
+            .or_else(|| {
+                (instance_name != self.default_agent.as_str())
+                    .then(|| self.configured_base_agent_name(&self.default_agent))
+                    .flatten()
+            })
+            .or_else(|| crate::agent::AGENT_SPECS.first().map(|spec| spec.name))
+            .unwrap_or(instance_name)
+    }
+
+    /// Resolve a requested instance through the configured fallback chain.
+    pub fn resolve_agent_name<'a>(&'a self, requested: &'a str) -> &'a str {
+        if self.configured_base_agent_name(requested).is_some() {
+            requested
+        } else if self.configured_base_agent_name(&self.default_agent).is_some() {
+            &self.default_agent
+        } else {
+            crate::agent::AGENT_SPECS
+                .first()
+                .map(|spec| spec.name)
+                .unwrap_or(requested)
+        }
+    }
+
+    /// Get the valid configured agent instance for a phase.
+    /// Missing or invalid phase references fall back to the configured default,
+    /// then to agtx's first built-in agent if the default is invalid as well.
     pub fn agent_for_phase(&self, phase: &str) -> &str {
-        self.explicit_agent_for_phase(phase)
-            .unwrap_or(&self.default_agent)
+        let requested = self
+            .explicit_agent_for_phase(phase)
+            .unwrap_or(&self.default_agent);
+        self.resolve_agent_name(requested)
     }
 
     /// Get the explicitly configured agent for a phase, if any.
@@ -1048,6 +1124,14 @@ mod managed_keys_tests {
                 running: Some("codex".into()),
                 review: Some("claude".into()),
             }),
+            agent_profiles: Some(BTreeMap::from([(
+                "work".into(),
+                AgentProfileConfig {
+                    agent: "omp".into(),
+                    profile: Some("work".into()),
+                    model: None,
+                },
+            )])),
             base_branch: Some("main".into()),
             github_url: Some("https://example.invalid".into()),
             worktree_dir: Some(".agtx/worktrees".into()),
@@ -1063,8 +1147,8 @@ mod managed_keys_tests {
         // look at the same shape it will.
         expand_inline_tables(doc.as_table_mut());
         for (key, item) in doc.as_table().iter() {
-            if item.is_table() {
-                // Sub-tables need both: `nested` so their own keys can be
+            if item.is_table() && key != "agent_profiles" {
+                // Fixed-schema sub-tables need both: `nested` so their own keys can be
                 // cleared, and `root` when the whole section is optional.
                 assert!(
                     PROJECT_MANAGED.nested.iter().any(|(t, _)| *t == key),
@@ -1086,8 +1170,8 @@ mod managed_keys_tests {
         }
     }
 
-    /// `GlobalConfig`'s only optional fields are the four phase agents; every
-    /// other key is required and therefore always re-emitted.
+    /// `GlobalConfig`'s optional fields are the four phase agents and the
+    /// named-profile map; every other key is required and always re-emitted.
     #[test]
     fn global_managed_keys_covers_the_phase_agents() {
         let agents = PhaseAgentsConfig {
@@ -1104,5 +1188,72 @@ mod managed_keys_tests {
                 "`agents.{key}` can be cleared but would not be removed"
             );
         }
+    }
+
+    #[test]
+    fn existing_configs_parse_without_agent_profiles() {
+        let global: GlobalConfig = toml::from_str(
+            r#"
+default_agent = "claude"
+
+[agents]
+running = "codex"
+"#,
+        )
+        .unwrap();
+        let project: ProjectConfig = toml::from_str(
+            r#"
+default_agent = "gemini"
+"#,
+        )
+        .unwrap();
+
+        assert!(global.agent_profiles.is_empty());
+        assert!(project.agent_profiles.is_none());
+        assert_eq!(global.agents.running.as_deref(), Some("codex"));
+        assert_eq!(project.default_agent.as_deref(), Some("gemini"));
+    }
+
+    #[test]
+    fn project_profiles_override_same_named_globals() {
+        let global: GlobalConfig = toml::from_str(
+            r#"
+[agent_profiles.omp-work]
+agent = "omp"
+profile = "global"
+model = "anthropic/claude-sonnet"
+
+[agent_profiles.omp-personal]
+agent = "omp"
+profile = "personal"
+"#,
+        )
+        .unwrap();
+        let project: ProjectConfig = toml::from_str(
+            r#"
+[agent_profiles.omp-work]
+agent = "omp"
+profile = "project"
+"#,
+        )
+        .unwrap();
+
+        let merged = MergedConfig::merge(&global, &project);
+
+        assert_eq!(merged.agent_profiles.len(), 2);
+        assert_eq!(
+            merged.agent_profiles["omp-work"],
+            AgentProfileConfig {
+                agent: "omp".into(),
+                profile: Some("project".into()),
+                model: None,
+            }
+        );
+        assert_eq!(
+            merged.agent_profiles["omp-personal"].profile.as_deref(),
+            Some("personal")
+        );
+        assert_eq!(merged.base_agent_name("omp-work"), "omp");
+        assert_eq!(merged.base_agent_name("claude"), "claude");
     }
 }

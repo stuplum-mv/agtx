@@ -24,6 +24,7 @@ const AGENTS: &[&str] = &[
     "cursor",
     "grok",
     "antigravity",
+    "omp",
     "pi",
 ];
 
@@ -73,6 +74,8 @@ fn interactive_command_parity_without_prompt() {
             "antigravity",
             "agy --dangerously-skip-permissions --mode accept-edits",
         ),
+        // OMP's approval bypass is independent from Earendil Pi's project trust.
+        ("omp", "omp --auto-approve"),
         // pi has no permission system to bypass; `--approve` is project trust,
         // without which the worktree's own skills are never loaded.
         ("pi", "pi --approve"),
@@ -103,6 +106,7 @@ fn interactive_command_parity_with_prompt() {
             "antigravity",
             "agy --dangerously-skip-permissions --mode accept-edits -i 'hi'",
         ),
+        ("omp", "omp --auto-approve 'hi'"),
         ("pi", "pi --approve 'hi'"),
     ];
     for (name, want) in expected {
@@ -153,6 +157,7 @@ fn resume_command_parity() {
             "antigravity",
             "agy --dangerously-skip-permissions --mode accept-edits --continue",
         ),
+        ("omp", "omp --auto-approve --continue"),
         ("pi", "pi --approve --continue"),
     ];
     for (name, want) in expected {
@@ -177,7 +182,13 @@ fn headless_invocation_parity() {
         ("cursor", "agent", &["--print", "--yolo"]),
         ("grok", "grok", &["-p"]),
         ("antigravity", "agy", &["-p"]),
-        // `--no-approve`: a one-shot PR description has no use for the repo's
+        // OMP print mode may still use tools, but must not replace the profile session.
+        (
+            "omp",
+            "omp",
+            &["--auto-approve", "--no-session", "--print"],
+        ),
+        // `--no-approve`: a one-shot Pi PR description has no use for the repo's
         // own skills or extensions, so it declines them.
         ("pi", "pi", &["--no-approve", "-p"]),
     ];
@@ -233,6 +244,8 @@ fn prompt_injection_parity() {
         // agy 1.1.21 — an argv prompt is queued behind the trust dialog, not eaten
         ("antigravity", PromptInjection::FlagInteractive("-i")),
         // pi 0.84.3 — `pi --approve '<prompt>'` stays interactive and submits it
+        // omp 18.2.0 — positional prompt remains interactive under --auto-approve
+        ("omp", PromptInjection::Argv),
         ("pi", PromptInjection::Argv),
     ];
     for (name, want) in verified {
@@ -276,6 +289,7 @@ fn native_skill_dir_parity() {
         ("grok", Some((".grok/skills", ""))),
         // Vendor-neutral tree, not an agent dotdir.
         ("antigravity", Some((".agents/skills", ""))),
+        ("omp", Some((".omp/skills", ""))),
         ("pi", Some((".pi/skills", ""))),
     ];
     for (name, want) in expected {
@@ -309,6 +323,7 @@ fn skill_filename_parity() {
         ("cursor", "plan.md"),
         ("grok", "plan.md"),
         ("antigravity", "plan.md"),
+        ("omp", "plan.md"),
         ("pi", "plan.md"),
     ];
     for (name, want) in expected {
@@ -339,8 +354,9 @@ fn plugin_command_parity() {
         ("cursor", Some("/gsd-plan-phase 1")),
         ("grok", Some("/gsd-plan-phase 1")),
         ("antigravity", Some("/gsd-plan-phase 1")),
-        // pi has one `skill:` namespace for every skill, so the plugin's own
-        // namespace is folded into the skill name rather than kept as a prefix.
+        // OMP and Pi use one `skill:` namespace, folding the plugin namespace
+        // into the skill name rather than keeping it as a prefix.
+        ("omp", Some("/skill:gsd-plan-phase 1")),
         ("pi", Some("/skill:gsd-plan-phase 1")),
     ];
     for (name, want) in expected {
@@ -425,6 +441,12 @@ fn identity_parity() {
             "Antigravity <noreply@google.com>",
         ),
         (
+            "omp",
+            "omp",
+            "Oh My Pi coding agent",
+            "Oh My Pi <noreply@oh-my-pi.dev>",
+        ),
+        (
             "pi",
             "pi",
             "Earendil's pi coding agent",
@@ -468,6 +490,7 @@ fn scan_agent_skills_parity() {
     write(root, ".cursor/skills/agtx-plan/SKILL.md", MD_SKILL);
     write(root, ".grok/skills/agtx-plan/SKILL.md", MD_SKILL);
     write(root, ".agents/skills/agtx-plan/SKILL.md", MD_SKILL);
+    write(root, ".omp/skills/agtx-plan/SKILL.md", MD_SKILL);
     write(root, ".pi/skills/agtx-plan/SKILL.md", MD_SKILL);
     // OpenCode's project commands live under .config/, not in the tree agtx
     // deploys into (.opencode/command). Both are written here to lock which one
@@ -487,7 +510,8 @@ fn scan_agent_skills_parity() {
         ("cursor", &[("/agtx-plan", "Plan the work")]),
         ("grok", &[("/agtx-plan", "Plan the work")]),
         ("antigravity", &[("/agtx-plan", "Plan the work")]),
-        // Same SkillDir layout, but pi types it under its own namespace.
+        // OMP and Pi type SkillDir entries under their own skill namespace.
+        ("omp", &[("/skill:agtx-plan", "Plan the work")]),
         ("pi", &[("/skill:agtx-plan", "Plan the work")]),
     ];
     for (name, want) in expected {

@@ -100,6 +100,7 @@ pub const AGENT_CONFIG_DIRS: &[&str] = &[
     ".codex",
     ".github/agents",
     ".config/opencode",
+    ".omp",
 ];
 
 /// Output from a shell script run inside a worktree.

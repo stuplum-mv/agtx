@@ -57,6 +57,7 @@
 <a href="https://github.com/google-gemini/gemini-cli"><kbd><img src="docs/logos/gemini.svg" width="18" valign="middle" /> Gemini CLI</kbd></a>
 <a href="https://github.com/github/copilot-cli"><kbd><img src="docs/logos/copilot-dark.svg" width="18" valign="middle" /> Copilot</kbd></a>
 <a href="https://github.com/earendil-works/pi"><kbd><img src="docs/logos/pi-dark.svg" width="18" valign="middle" /> pi</kbd></a>
+<a href="https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent"><kbd>Oh My Pi (OMP)</kbd></a>
 - **Parallel Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Grok for research, Claude for implementation, Codex for review — with automatic agent switching and context handover.
 - **Multi-project Kanban board**: Manage agent sessions across all projects via a single TUI without leaving your terminal.
 - **Vim-native Keybindings**: Control the board and agent sessions with your Vim-powered muscle memory.
@@ -613,6 +614,70 @@ review = "codex"
 running = "codex"
 ```
 
+### Oh My Pi (OMP) profiles and models
+
+Install and authenticate OMP first:
+
+```bash
+bun install --global @oh-my-pi/pi-coding-agent
+omp
+```
+
+OMP is a separate agent from Earendil Pi (`pi`). A named agent profile gives an
+OMP instance its own agtx name and can add an OMP `--profile` and/or `--model`.
+Because OMP profiles isolate authentication as well as sessions, initialize each named
+profile with `omp --profile <name>` unless its provider credentials come from the
+environment. To use one OMP model for every phase:
+
+```toml
+default_agent = "omp-default"
+
+[agent_profiles.omp-default]
+agent = "omp"
+model = "cursor/gpt-5.6-sol:high"
+```
+
+To select a different OMP profile or model per phase:
+
+```toml
+default_agent = "omp-default"
+
+[agents]
+research = "omp-research"
+planning = "omp-planning"
+running = "omp-running"
+review = "omp-review"
+
+[agent_profiles.omp-default]
+agent = "omp"
+
+[agent_profiles.omp-research]
+agent = "omp"
+profile = "agtx-research"
+model = "cursor/gpt-5.6-sol:high"
+
+[agent_profiles.omp-planning]
+agent = "omp"
+profile = "agtx-planning"
+model = "cursor/gpt-5.6-sol:high"
+
+[agent_profiles.omp-running]
+agent = "omp"
+profile = "agtx-running"
+model = "cursor/gpt-5.6-sol:high"
+
+[agent_profiles.omp-review]
+agent = "omp"
+profile = "agtx-review"
+model = "cursor/gpt-5.6-sol:high"
+```
+
+Use a distinct OMP `profile` when phases need separate conversation histories.
+On returning to that phase, agtx launches the named instance with
+`--profile … --continue`, so OMP resumes that profile's session in the task
+worktree. Project-level `agent_profiles` override same-named global profiles;
+ordinary string values in `[agents]` remain supported.
+
 ## Plugins
 
 Plug any spec-driven framework into the task lifecycle. Define commands, prompts, and artifacts — agtx handles phase gating, artifact polling, worktree sync, agent switching, and autonomous execution.
@@ -636,21 +701,21 @@ Press `P` to switch plugins. Ships with 10 built-in:
 
 Commands are written once in canonical format and automatically translated per agent:
 
-| Canonical (plugin.toml) | Claude / Gemini | Codex | OpenCode | Cursor | Grok | Antigravity | pi |
-|--------------------------|-----------------|-------|----------|--------|------|-------------|----|
+| Canonical (plugin.toml) | Claude / Gemini | Codex | OpenCode | Cursor | Grok | Antigravity | pi / OMP |
+|--------------------------|-----------------|-------|----------|--------|------|-------------|----------|
 | `/agtx:plan` | `/agtx:plan` | `$agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/skill:agtx-plan` |
 
-|  | Claude | Codex | Gemini | OpenCode | Cursor | Copilot | Grok | Antigravity | pi |
-|--|:------:|:-----:|:------:|:--------:|:------:|:-------:|:----:|:-----------:|:--:|
-| **agtx** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ |
-| **gsd** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ |
-| **spec-kit** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 |
-| **openspec** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 |
-| **bmad** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 |
-| **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **oh-my-claudecode** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **agent-skills** | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
-| **void** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+|  | Claude | Codex | Gemini | OpenCode | Cursor | Copilot | Grok | Antigravity | pi | OMP |
+|--|:------:|:-----:|:------:|:--------:|:------:|:-------:|:----:|:-----------:|:--:|:---:|
+| **agtx** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ✅ |
+| **gsd** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| **spec-kit** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 | 🟡 |
+| **openspec** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 | 🟡 |
+| **bmad** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 | 🟡 |
+| **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **oh-my-claudecode** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **agent-skills** | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | ✅ |
+| **void** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
@@ -688,6 +753,10 @@ init_script = "npm install --prefix .my-plugin --{agent}"
 
 # Restrict to specific agents (empty or omitted = all agents supported)
 supported_agents = ["claude", "codex", "gemini", "opencode"]
+
+# Use base names here. A named profile such as "omp-review" is checked as
+# "omp", so an OMP-compatible custom plugin (for example ai-rules) should list:
+# supported_agents = ["omp"]
 
 # Extra directories to copy from project root into each worktree.
 # Agent config dirs (.claude, .gemini, .codex, .github/agents, .config/opencode)
