@@ -3825,8 +3825,8 @@ impl App {
             let project_config =
                 crate::config::ProjectConfig::load(&popup.project_path).unwrap_or_default();
             let global_config = crate::config::GlobalConfig::load().unwrap_or_default();
-            self.state.config = crate::config::MergedConfig::merge(&global_config, &project_config);
-            self.refresh_agent_configuration();
+            let config = crate::config::MergedConfig::merge(&global_config, &project_config);
+            self.install_config_for_current_project(config);
             self.state.flags.no_init_scripts = false;
             self.state.warning_message = Some((
                 "Project trusted. init_script, cleanup_script, and copy_files are now active."
@@ -3990,12 +3990,30 @@ impl App {
             .as_ref()
             .map(|path| ProjectConfig::load(path).unwrap_or_default())
             .unwrap_or_default();
-        self.state.config = MergedConfig::merge(&global, &project);
-        self.refresh_agent_configuration();
+        let config = MergedConfig::merge(&global, &project);
+        self.install_config_for_current_project(config);
         self.state.cached_plugin = Some(load_plugin_if_configured(
             &self.state.config,
             self.state.project_path.as_deref(),
         ));
+    }
+
+    fn install_config_for_current_project(&mut self, mut config: MergedConfig) {
+        // A live pane was launched from the old profile definition. Keep that
+        // definition until the pane exits so a config reload cannot reinterpret
+        // its process, exit command, or resume flags as a different base agent.
+        for task in &self.state.board.tasks {
+            if task.session_name.is_none() {
+                continue;
+            }
+            if let Some(profile) = self.state.config.agent_profiles.get(&task.agent) {
+                config
+                    .agent_profiles
+                    .insert(task.agent.clone(), profile.clone());
+            }
+        }
+        self.state.config = config;
+        self.refresh_agent_configuration();
     }
 
     fn refresh_agent_configuration(&mut self) {
@@ -4129,8 +4147,8 @@ impl App {
 
         // Refresh merged config and cached plugin
         let global_config = GlobalConfig::load().unwrap_or_default();
-        self.state.config = MergedConfig::merge(&global_config, &project_config);
-        self.refresh_agent_configuration();
+        let config = MergedConfig::merge(&global_config, &project_config);
+        self.install_config_for_current_project(config);
         self.state.cached_plugin = Some(load_plugin_if_configured(
             &self.state.config,
             Some(&project_path),
@@ -6047,7 +6065,13 @@ impl App {
         }
         let (planning_agent, agent_switch) =
             needs_agent_switch(&self.state.config, task, "planning");
-        let plugin = self.load_task_plugin_for_agent(task, &planning_agent);
+        let plugin = match self.load_transition_plugin(task, &planning_agent) {
+            Ok(plugin) => plugin,
+            Err(error) => {
+                self.show_transition_error(&error);
+                return Ok(true);
+            }
+        };
 
         // Block if planning phase doesn't accept {task} and no prior phase artifact exists
         if plugin
@@ -6309,10 +6333,16 @@ impl App {
     /// Planning → Running: send execution skill/prompt to agent.
     /// Always returns Ok(false) to continue with db update.
     fn transition_to_running(&mut self, task: &mut Task) -> Result<bool> {
+        let (running_agent, agent_switch) =
+            needs_agent_switch(&self.state.config, task, "running");
+        let plugin = match self.load_transition_plugin(task, &running_agent) {
+            Ok(plugin) => plugin,
+            Err(error) => {
+                self.show_transition_error(&error);
+                return Ok(true);
+            }
+        };
         if let Some(session_name) = &task.session_name {
-            let (running_agent, agent_switch) =
-                needs_agent_switch(&self.state.config, task, "running");
-            let plugin = self.load_task_plugin_for_agent(task, &running_agent);
             let current_base_agent = self.state.config.base_agent_name(&task.agent).to_string();
             let running_base_agent = self
                 .state
@@ -6388,8 +6418,14 @@ impl App {
             .config
             .base_agent_name(&review_agent)
             .to_string();
+        let plugin = match self.load_transition_plugin(task, &review_agent) {
+            Ok(plugin) => plugin,
+            Err(error) => {
+                self.show_transition_error(&error);
+                return Ok(true);
+            }
+        };
         if let Some(session_name) = &task.session_name {
-            let plugin = self.load_task_plugin_for_agent(task, &review_agent);
             let task_content = task.content_text();
             let skill_cmd = resolve_skill_command(
                 &plugin,
@@ -6590,7 +6626,13 @@ impl App {
         let plugin_name = task.plugin.clone();
         let agent_name = phase_agent(&self.state.config, &task, "research").to_string();
         let base_agent_name = self.state.config.base_agent_name(&agent_name).to_string();
-        let plugin = self.load_task_plugin_for_agent(&task, &agent_name);
+        let plugin = match self.load_transition_plugin(&task, &agent_name) {
+            Ok(plugin) => plugin,
+            Err(error) => {
+                self.show_transition_error(&error);
+                return Ok(());
+            }
+        };
 
         // Block if plugin has no research command (e.g. OpenSpec uses planning as first phase)
         let has_research_cmd = plugin.as_ref().map_or(false, |p| {
@@ -7367,7 +7409,13 @@ impl App {
         let running_agent = phase_agent(&self.state.config, &task, "running").to_string();
 
         // Block if running phase doesn't accept {task} and no prior phase artifact exists
-        let plugin_check = self.load_task_plugin_for_agent(&task, &running_agent);
+        let plugin_check = match self.load_transition_plugin(&task, &running_agent) {
+            Ok(plugin) => plugin,
+            Err(error) => {
+                self.show_transition_error(&error);
+                return Ok(());
+            }
+        };
         if plugin_check
             .as_ref()
             .map_or(false, |p| !p.phase_accepts_task("running"))
@@ -7389,7 +7437,7 @@ impl App {
         let task_content = task.content_text();
 
         let plugin_name = task.plugin.clone();
-        let plugin = self.load_task_plugin_for_agent(&task, &running_agent);
+        let plugin = plugin_check;
         let running_base_agent = self
             .state
             .config
@@ -7587,11 +7635,16 @@ impl App {
                     return Ok(());
                 }
 
+                let (running_agent, agent_switch) =
+                    needs_agent_switch(&self.state.config, &task, "running");
+                if let Err(error) = self.load_transition_plugin(&task, &running_agent) {
+                    self.show_transition_error(&error);
+                    return Ok(());
+                }
+
                 mark_reviewed_point(&task);
 
                 // Switch agent if running phase uses a different agent than review
-                let (running_agent, agent_switch) =
-                    needs_agent_switch(&self.state.config, &task, "running");
                 let current_base_agent =
                     self.state.config.base_agent_name(&task.agent).to_string();
                 if agent_switch {
@@ -7640,12 +7693,19 @@ impl App {
                     return Ok(());
                 }
 
-                // Increment cycle counter for the next phase
-                task.cycle += 1;
-
-                // Switch agent if planning phase uses a different agent than review
+                // Resolve and validate the destination before changing the cycle.
                 let (planning_agent, agent_switch) =
                     needs_agent_switch(&self.state.config, &task, "planning");
+                let plugin = match self.load_transition_plugin(&task, &planning_agent) {
+                    Ok(plugin) => plugin,
+                    Err(error) => {
+                        self.show_transition_error(&error);
+                        return Ok(());
+                    }
+                };
+
+                // Increment cycle counter for the next phase
+                task.cycle += 1;
                 let current_base_agent =
                     self.state.config.base_agent_name(&task.agent).to_string();
                 let planning_base_agent = self
@@ -7653,7 +7713,6 @@ impl App {
                     .config
                     .base_agent_name(&planning_agent)
                     .to_string();
-                let plugin = self.load_task_plugin_for_agent(&task, &planning_agent);
 
                 // Resolve skill command and prompt for the new planning phase
                 let task_content = task
@@ -7747,6 +7806,10 @@ impl App {
                 // Switch agent if planning phase uses a different agent than running
                 let (planning_agent, agent_switch) =
                     needs_agent_switch(&self.state.config, &task, "planning");
+                if let Err(error) = self.load_transition_plugin(&task, &planning_agent) {
+                    self.show_transition_error(&error);
+                    return Ok(());
+                }
                 let current_base_agent =
                     self.state.config.base_agent_name(&task.agent).to_string();
                 if agent_switch {
@@ -7904,6 +7967,24 @@ impl App {
         );
         if is_forward && task.status == TaskStatus::Backlog && !db.deps_satisfied(&task) {
             anyhow::bail!("Cannot advance task: dependencies not in Review/Done");
+        }
+
+        let destination_phase = match req.action.as_str() {
+            "research" => Some("research"),
+            "move_to_planning" => Some("planning"),
+            "move_to_running" | "resume" => Some("running"),
+            "move_to_review" => Some("review"),
+            "move_forward" => match task.status {
+                TaskStatus::Backlog => Some("planning"),
+                TaskStatus::Planning => Some("running"),
+                TaskStatus::Running => Some("review"),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(phase) = destination_phase {
+            let destination = phase_agent(&self.state.config, &task, phase);
+            self.load_transition_plugin(&task, destination)?;
         }
 
         match req.action.as_str() {
@@ -8183,7 +8264,7 @@ impl App {
             .base_agent_name(&review_agent)
             .to_string();
         if let Some(session_name) = &task.session_name {
-            let plugin = self.load_task_plugin_for_agent(task, &review_agent);
+            let plugin = self.load_transition_plugin(task, &review_agent)?;
             let task_content = task.content_text();
             let skill_cmd = resolve_skill_command(
                 &plugin,
@@ -8354,6 +8435,10 @@ impl App {
         // double-escape and break the command.
         let mcp_json_str = mcp_json.to_string().replace('\'', "'\"'\"'");
 
+        if let Some(spec) = agent::spec(&base_agent).filter(|spec| spec.name == "omp") {
+            exclude_agtx_files_from_git(&project_path);
+            write_mcp_config(spec, &project_path_str, &project_path_str, &agtx_bin);
+        }
         let agent_cmd = agent.build_orchestrator_command(&mcp_json_str, &agtx_bin);
 
         // Ensure project tmux session exists
@@ -8543,6 +8628,23 @@ impl App {
             self.state.project_path.as_deref(),
             self.state.config.base_agent_name(instance_name),
         )
+    }
+
+    /// Validate the destination before a phase transition mutates task state.
+    fn load_transition_plugin(
+        &self,
+        task: &Task,
+        instance_name: &str,
+    ) -> Result<Option<WorkflowPlugin>> {
+        load_task_plugin_checked(
+            task,
+            self.state.project_path.as_deref(),
+            self.state.config.base_agent_name(instance_name),
+        )
+    }
+
+    fn show_transition_error(&mut self, error: &anyhow::Error) {
+        self.state.warning_message = Some((error.to_string(), Instant::now()));
     }
 
     pub fn refresh_tasks(&mut self) -> Result<()> {
@@ -9754,13 +9856,78 @@ const AGTX_WRITTEN_PATHS: &[&str] = &[
     ".github/agents/agtx/",
     ".pi/mcp.json",
     ".pi/skills/agtx-*/",
-    ".omp/mcp.json",
     ".omp/skills/agtx-*/",
 ];
+
+const OBSOLETE_AGTX_WRITTEN_PATHS: &[&str] = &[".omp/mcp.json"];
 
 /// Marks agtx's block in `info/exclude` so it is written once and is obvious to
 /// anyone who finds it.
 const AGTX_EXCLUDE_MARKER: &str = "# agtx: files agtx writes into worktrees";
+const AGTX_EXCLUDE_END_MARKER: &str = "# /agtx";
+
+/// Remove the MCP server written by the pre-plugin OMP integration.
+///
+/// Returning false keeps the old exclude rule in place: exposing a malformed
+/// file that may still contain agtx bookkeeping would make it look like task
+/// work and block completion.
+fn migrate_obsolete_omp_mcp(worktree: &Path) -> bool {
+    let path = worktree.join(".omp/mcp.json");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return !path.exists();
+    };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(root_obj) = root.as_object_mut() else {
+        return false;
+    };
+
+    let removed = match root_obj.get_mut("mcpServers") {
+        None => return true,
+        Some(serde_json::Value::Object(servers)) => servers.remove("agtx").is_some(),
+        Some(_) => return false,
+    };
+    if !removed {
+        return true;
+    }
+
+    if root_obj
+        .get("mcpServers")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(serde_json::Map::is_empty)
+    {
+        root_obj.remove("mcpServers");
+    }
+    if root_obj.is_empty() {
+        std::fs::remove_file(&path).is_ok()
+    } else {
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&root).unwrap_or_default(),
+        )
+        .is_ok()
+    }
+}
+
+fn agtx_exclude_block_bounds(lines: &[&str]) -> Option<(usize, usize)> {
+    let start = lines
+        .iter()
+        .position(|line| line.trim() == AGTX_EXCLUDE_MARKER)?;
+    let end = lines[start..]
+        .iter()
+        .position(|line| line.trim() == AGTX_EXCLUDE_END_MARKER)
+        .map(|offset| start + offset + 1)
+        // Legacy blocks had no end marker and always ended with this path.
+        .or_else(|| {
+            lines[start..]
+                .iter()
+                .position(|line| line.trim() == ".omp/skills/agtx-*/")
+                .map(|offset| start + offset + 1)
+        })
+        .unwrap_or(start + 1);
+    Some((start, end))
+}
 
 /// Hide agtx's own bookkeeping from git, so it does not read as the agent's
 /// uncommitted work.
@@ -9798,7 +9965,6 @@ fn exclude_agtx_files_from_git(worktree: &Path) {
     if common.is_empty() {
         return;
     }
-    // `--git-common-dir` answers relative to the worktree unless it is absolute.
     let common = {
         let p = Path::new(&common);
         if p.is_absolute() {
@@ -9810,7 +9976,59 @@ fn exclude_agtx_files_from_git(worktree: &Path) {
 
     let exclude = common.join("info").join("exclude");
     let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
-    if existing.contains(AGTX_EXCLUDE_MARKER) {
+    let lines: Vec<&str> = existing.lines().collect();
+    let block_bounds = agtx_exclude_block_bounds(&lines);
+    let owns_obsolete_omp_rule = block_bounds.is_some_and(|(start, end)| {
+        lines[start..end]
+            .iter()
+            .any(|line| OBSOLETE_AGTX_WRITTEN_PATHS.contains(&line.trim()))
+    });
+    let omp_migrated = !owns_obsolete_omp_rule || migrate_obsolete_omp_mcp(worktree);
+    if let Some((start, end)) = block_bounds {
+        let had_trailing_newline = existing.ends_with('\n');
+
+        let preserved_inside: Vec<String> = lines[start + 1..end]
+            .iter()
+            .filter(|line| {
+                let line = line.trim();
+                line != AGTX_EXCLUDE_END_MARKER
+                    && !AGTX_WRITTEN_PATHS.contains(&line)
+                    && !OBSOLETE_AGTX_WRITTEN_PATHS.contains(&line)
+                    && !line.starts_with("# Only untracked files are affected;")
+                    && !line.starts_with("# Delete this block to see them in")
+            })
+            .map(|line| (*line).to_string())
+            .collect();
+        let mut updated_lines: Vec<String> =
+            lines[..start].iter().map(|line| (*line).to_string()).collect();
+        updated_lines.push(AGTX_EXCLUDE_MARKER.to_string());
+        updated_lines.push(
+            "# Only untracked files are affected; anything this project tracks is untouched."
+                .to_string(),
+        );
+        updated_lines
+            .push("# Delete this block to see them in git status again.".to_string());
+        updated_lines.extend(AGTX_WRITTEN_PATHS.iter().map(|pattern| (*pattern).to_string()));
+        if !omp_migrated {
+            updated_lines.extend(
+                OBSOLETE_AGTX_WRITTEN_PATHS
+                    .iter()
+                    .map(|pattern| (*pattern).to_string()),
+            );
+        }
+        updated_lines.extend(preserved_inside);
+        updated_lines.push(AGTX_EXCLUDE_END_MARKER.to_string());
+        updated_lines.extend(lines[end..].iter().map(|line| (*line).to_string()));
+
+        let mut updated = updated_lines.join("\n");
+        if had_trailing_newline {
+            updated.push('\n');
+        }
+        if updated != existing {
+            if let Err(e) = std::fs::write(&exclude, updated) {
+                tracing::warn!(path = %exclude.display(), error = %e, "Failed to update git exclude");
+            }
+        }
         return;
     }
 
@@ -9821,12 +10039,20 @@ fn exclude_agtx_files_from_git(worktree: &Path) {
     out.push_str(&format!(
         "\n{AGTX_EXCLUDE_MARKER}\n\
          # Only untracked files are affected; anything this project tracks is untouched.\n\
-         # Delete this block to see them in `git status` again.\n"
+         # Delete this block to see them in git status again.\n"
     ));
     for pattern in AGTX_WRITTEN_PATHS {
         out.push_str(pattern);
         out.push('\n');
     }
+    if !omp_migrated {
+        for pattern in OBSOLETE_AGTX_WRITTEN_PATHS {
+            out.push_str(pattern);
+            out.push('\n');
+        }
+    }
+    out.push_str(AGTX_EXCLUDE_END_MARKER);
+    out.push('\n');
 
     if let Some(dir) = exclude.parent() {
         if std::fs::create_dir_all(dir).is_err() {
@@ -12136,6 +12362,18 @@ fn resolve_skill_command(
     skills::transform_plugin_command(&expanded, base_agent_name)
 }
 
+/// OMP profiles own isolated persisted sessions, so returning to one should
+/// continue it even during the task's first workflow cycle. Other agents retain
+/// the existing cycle-gated resume behavior because a named registry alias does
+/// not necessarily isolate that CLI's session storage.
+fn should_resume_instance(
+    instance_name: &str,
+    base_agent_name: &str,
+    resume_on_switch: bool,
+) -> bool {
+    instance_name != base_agent_name && (resume_on_switch || base_agent_name == "omp")
+}
+
 /// Spawn a background thread that optionally switches agent, waits for readiness,
 /// then sends a skill command and prompt to the tmux pane.
 #[allow(clippy::too_many_arguments)]
@@ -12206,10 +12444,15 @@ fn spawn_send_to_agent(
                 }
             }
             let agent_ops = agent_registry.get(&target_agent);
-            // A first-time switch can deliver the opening message in argv. On a
-            // later workflow cycle, a named instance resumes its own persisted
-            // session first and receives the phase command through the live pane.
-            let resume_target = resume_on_switch && target_agent != target_base_agent;
+            // A named instance owns a distinct persisted conversation. Always ask
+            // it to continue when switching back: OMP starts a fresh session when
+            // the profile has no prior session for this worktree, and resumes the
+            // right one even when the return happens within the first task cycle.
+            let resume_target = should_resume_instance(
+                &target_agent,
+                &target_base_agent,
+                resume_on_switch,
+            );
             let launch_text = compose_launch_text(skill_cmd_launch.as_deref(), &prompt);
             delivered_at_launch = !resume_target
                 && agent::spec::can_launch_with_prompt(agent_ops.prompt_injection(), &launch_text);
@@ -13693,25 +13936,48 @@ fn wait_for_agent_ready(
     Some(target.to_string())
 }
 
-/// Load the workflow plugin for a task, checking agent compatibility.
-/// Tries disk first (project-local → global), then falls back to bundled plugins.
-fn load_task_plugin(
+/// Load the workflow plugin selected by a task without applying agent filtering.
+fn load_task_plugin_candidate(
     task: &Task,
     project_path: Option<&Path>,
-    default_base_agent: &str,
 ) -> Option<WorkflowPlugin> {
-    let plugin = match &task.plugin {
+    match &task.plugin {
         Some(name) => WorkflowPlugin::load(name, project_path)
             .ok()
             .or_else(|| skills::load_bundled_plugin(name)),
         None => skills::load_bundled_plugin("agtx"),
-    };
-    if let Some(ref p) = plugin {
-        if !p.supports_agent(default_base_agent) {
-            return None;
+    }
+}
+
+/// Load the workflow plugin for a task, checking agent compatibility.
+fn load_task_plugin_checked(
+    task: &Task,
+    project_path: Option<&Path>,
+    base_agent: &str,
+) -> Result<Option<WorkflowPlugin>> {
+    let plugin = load_task_plugin_candidate(task, project_path);
+    if let Some(ref plugin) = plugin {
+        if !plugin.supports_agent(base_agent) {
+            let name = task.plugin.as_deref().unwrap_or("agtx");
+            anyhow::bail!(
+                "Plugin '{}' does not support destination agent '{}'",
+                name,
+                base_agent
+            );
         }
     }
-    plugin
+    Ok(plugin)
+}
+
+/// Compatibility-filtered loader for read-only status and rendering paths.
+fn load_task_plugin(
+    task: &Task,
+    project_path: Option<&Path>,
+    base_agent: &str,
+) -> Option<WorkflowPlugin> {
+    load_task_plugin_checked(task, project_path, base_agent)
+        .ok()
+        .flatten()
 }
 
 /// Load workflow plugin if configured
@@ -14510,12 +14776,31 @@ fn write_mcp_config(
                 &project_path_str,
             );
         }
-        agent::McpConfigKind::OmpJsonMerge => {
-            merge_mcp_servers_json(
-                &Path::new(worktree_path).join(".omp"),
-                "mcp.json",
-                &agtx_bin,
-                &project_path_str,
+        agent::McpConfigKind::OmpPlugin => {
+            // OMP can load an explicit Agent Plugin. Keeping agtx's generated MCP
+            // definition under the gitignored .agtx directory avoids modifying a
+            // project's tracked .omp/mcp.json on every task branch.
+            let dir = Path::new(worktree_path).join(".agtx/omp-plugin");
+            let _ = std::fs::create_dir_all(&dir);
+            write_json(
+                &dir.join("plugin.json"),
+                &serde_json::json!({
+                    "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                    "name": "agtx"
+                }),
+            );
+            write_json(
+                &dir.join("mcp.json"),
+                &serde_json::json!({
+                    "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+                    "mcpServers": {
+                        "agtx": {
+                            "type": "stdio",
+                            "command": "env",
+                            "args": [agtx_bin, "mcp-serve", project_path_str]
+                        }
+                    }
+                }),
             );
         }
         agent::McpConfigKind::OpenCode => {

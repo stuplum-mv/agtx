@@ -809,7 +809,10 @@ fn a_project_config_overrides_the_global_default_agent() {
         ..ProjectConfig::default()
     };
 
-    assert_eq!(MergedConfig::merge(&global, &project).default_agent, "claude");
+    assert_eq!(
+        MergedConfig::merge(&global, &project).default_agent,
+        "claude"
+    );
     assert_eq!(
         MergedConfig::merge(&global, &ProjectConfig::default()).default_agent,
         "opencode"
@@ -890,27 +893,26 @@ model = "cursor/review model"
     .unwrap();
 
     let merged = MergedConfig::merge(&global, &ProjectConfig::default());
-    let registry =
-        RealAgentRegistry::with_profiles(&merged.default_agent, &merged.agent_profiles);
+    let registry = RealAgentRegistry::with_profiles(&merged.default_agent, &merged.agent_profiles);
 
     let research = registry.get(merged.agent_for_phase("research"));
     assert_eq!(
         research.build_interactive_command("investigate"),
-        "omp --profile 'research profile' --model 'cursor/research model' --auto-approve 'investigate'"
+        "omp --profile 'research profile' --model 'cursor/research model' --auto-approve --plugin-dir .agtx/omp-plugin 'investigate'"
     );
     assert_eq!(
         research.build_resume_command(),
-        "omp --profile 'research profile' --model 'cursor/research model' --auto-approve --continue"
+        "omp --profile 'research profile' --model 'cursor/research model' --auto-approve --plugin-dir .agtx/omp-plugin --continue"
     );
 
     let review = registry.get(merged.agent_for_phase("review"));
     assert_eq!(
         review.build_interactive_command("review"),
-        "omp --profile 'review profile' --model 'cursor/review model' --auto-approve 'review'"
+        "omp --profile 'review profile' --model 'cursor/review model' --auto-approve --plugin-dir .agtx/omp-plugin 'review'"
     );
     assert_eq!(
         review.build_resume_command(),
-        "omp --profile 'review profile' --model 'cursor/review model' --auto-approve --continue"
+        "omp --profile 'review profile' --model 'cursor/review model' --auto-approve --plugin-dir .agtx/omp-plugin --continue"
     );
 }
 
@@ -935,9 +937,7 @@ supported_agents = ["omp"]
     .unwrap();
 
     assert!(!plugin.supports_agent("omp-review"));
-    assert!(plugin.supports_agent(
-        merged.base_agent_name("omp-review")
-    ));
+    assert!(plugin.supports_agent(merged.base_agent_name("omp-review")));
 }
 
 #[test]
@@ -969,10 +969,8 @@ agent = "omp"
     assert_eq!(merged.base_agent_name("invalid-profile"), "omp");
     assert_eq!(merged.base_agent_name("claude"), "claude");
 
-    let invalid_default: GlobalConfig = toml::from_str(
-        r#"default_agent = "missing-profile""#,
-    )
-    .unwrap();
+    let invalid_default: GlobalConfig =
+        toml::from_str(r#"default_agent = "missing-profile""#).unwrap();
     let merged = MergedConfig::merge(&invalid_default, &ProjectConfig::default());
     assert_eq!(merged.agent_for_phase("planning"), "claude");
     assert_eq!(merged.base_agent_name("missing-profile"), "claude");

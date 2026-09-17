@@ -145,15 +145,23 @@ pub fn initialize_worktree(
 ) -> Vec<String> {
     let mut warnings = Vec::new();
 
-    // Always copy agent config directories
+    // Always copy agent config directories, but never follow symlinks into
+    // profile state or credentials outside the project.
     for dir_name in AGENT_CONFIG_DIRS {
         let src = project_path.join(dir_name);
-        if src.is_dir() {
-            let dst = worktree_path.join(dir_name);
-            if let Err(e) = copy_dir_recursive(&src, &dst) {
-                warnings.push(format!("Failed to copy '{}' to worktree: {}", dir_name, e));
-            }
+        let Ok(metadata) = std::fs::symlink_metadata(&src) else {
+            continue;
+        };
+        if !metadata.is_dir() && !metadata.file_type().is_symlink() {
+            continue;
         }
+
+        let dst = worktree_path.join(dir_name);
+        let mut skipped_symlinks = Vec::new();
+        if let Err(e) = copy_dir_recursive_impl(&src, &dst, &mut skipped_symlinks) {
+            warnings.push(format!("Failed to copy '{}' to worktree: {}", dir_name, e));
+        }
+        append_skipped_symlink_warnings(&mut warnings, project_path, skipped_symlinks);
     }
 
     // Copy plugin-specific extra directories
@@ -173,9 +181,11 @@ pub fn initialize_worktree(
                 }
             }
             let dst = worktree_path.join(dir_name);
-            if let Err(e) = copy_dir_recursive(&src, &dst) {
+            let mut skipped_symlinks = Vec::new();
+            if let Err(e) = copy_dir_recursive_impl(&src, &dst, &mut skipped_symlinks) {
                 warnings.push(format!("Failed to copy '{}' to worktree: {}", dir_name, e));
             }
+            append_skipped_symlink_warnings(&mut warnings, project_path, skipped_symlinks);
         }
     }
 
@@ -202,15 +212,18 @@ pub fn initialize_worktree(
             let src = project_path.join(file_name);
             let dst = worktree_path.join(file_name);
 
-            if !src.exists() {
-                warnings.push(format!(
-                    "copy_files: '{}' not found in project root, skipping",
-                    file_name
-                ));
-                continue;
-            }
-
-            // Validate resolved path stays within project root
+            let metadata = match std::fs::symlink_metadata(&src) {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    warnings.push(format!(
+                        "copy_files: '{}' not found in project root, skipping",
+                        file_name
+                    ));
+                    continue;
+                }
+            };
+            // Validate the resolved target before the generic symlink warning so
+            // links escaping the project retain the actionable traversal reason.
             if let Some(ref canon_proj) = canonical_project {
                 if let Ok(canon_src) = src.canonicalize() {
                     if !canon_src.starts_with(canon_proj) {
@@ -222,14 +235,20 @@ pub fn initialize_worktree(
                     }
                 }
             }
+            if metadata.file_type().is_symlink() {
+                append_skipped_symlink_warnings(&mut warnings, project_path, vec![src.clone()]);
+                continue;
+            }
 
-            if src.is_dir() {
-                if let Err(e) = copy_dir_recursive(&src, &dst) {
+            if metadata.is_dir() {
+                let mut skipped_symlinks = Vec::new();
+                if let Err(e) = copy_dir_recursive_impl(&src, &dst, &mut skipped_symlinks) {
                     warnings.push(format!(
                         "Failed to copy directory '{}' to worktree: {}",
                         file_name, e
                     ));
                 }
+                append_skipped_symlink_warnings(&mut warnings, project_path, skipped_symlinks);
             } else {
                 if let Some(parent) = dst.parent() {
                     if !parent.exists() {
@@ -275,15 +294,55 @@ pub fn initialize_worktree(
     warnings
 }
 
-/// Recursively copy a directory and its contents.
+fn append_skipped_symlink_warnings(
+    warnings: &mut Vec<String>,
+    project_path: &Path,
+    skipped_symlinks: Vec<PathBuf>,
+) {
+    for skipped in skipped_symlinks {
+        let relative = skipped.strip_prefix(project_path).unwrap_or(&skipped);
+        warnings.push(format!(
+            "Skipped symlink '{}' while copying to worktree",
+            relative.display()
+        ));
+    }
+}
+
+/// Recursively copy a directory and its contents without following symlinks.
 pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    let mut skipped_symlinks = Vec::new();
+    copy_dir_recursive_impl(src, dst, &mut skipped_symlinks)?;
+    if !skipped_symlinks.is_empty() {
+        anyhow::bail!(
+            "skipped {} symlink(s) while recursively copying '{}'",
+            skipped_symlinks.len(),
+            src.display()
+        );
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive_impl(
+    src: &Path,
+    dst: &Path,
+    skipped_symlinks: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(src)?;
+    if metadata.file_type().is_symlink() {
+        skipped_symlinks.push(src.to_path_buf());
+        return Ok(());
+    }
+
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
+        let metadata = std::fs::symlink_metadata(&src_path)?;
+        if metadata.file_type().is_symlink() {
+            skipped_symlinks.push(src_path);
+        } else if metadata.is_dir() {
+            copy_dir_recursive_impl(&src_path, &dst_path, skipped_symlinks)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
         }

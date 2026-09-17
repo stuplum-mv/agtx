@@ -3,8 +3,8 @@
 //! This module provides a generic interface for interacting with coding agents
 //! like Claude Code, Aider, Codex, etc.
 
-use anyhow::Result;
 use crate::config::AgentProfileConfig;
+use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
@@ -212,7 +212,10 @@ impl RealAgentRegistry {
             name
         };
 
-        Self { agents, default_name }
+        Self {
+            agents,
+            default_name,
+        }
     }
 }
 impl AgentRegistry for RealAgentRegistry {
@@ -254,7 +257,7 @@ mod tests {
 
         assert_eq!(
             registry.get("omp-work").build_resume_command(),
-            "omp --profile 'work' --model 'openai/gpt 5' --auto-approve --continue"
+            "omp --profile 'work' --model 'openai/gpt 5' --auto-approve --plugin-dir .agtx/omp-plugin --continue"
         );
         assert_eq!(
             registry.get("broken").build_resume_command(),

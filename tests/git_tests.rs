@@ -833,7 +833,7 @@ fn test_initialize_worktree_copy_dirs_rejects_traversal() {
     let worktree_path = git::create_worktree(temp_dir.path(), "dir-traversal").unwrap();
 
     // Create a directory outside the project that a symlink could point to
-    let outside_dir = temp_dir.path().join("..");
+    let _outside_dir = temp_dir.path().join("..");
     // The copy_dirs path traversal check should catch this
     let warnings = git::initialize_worktree(
         temp_dir.path(),
@@ -875,6 +875,111 @@ fn test_initialize_worktree_symlink_traversal_blocked() {
         // The canonicalized path of the symlink resolves outside the project root
         assert!(!warnings.is_empty());
         assert!(warnings[0].contains("outside project root"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_initialize_worktree_skips_top_level_omp_symlink() {
+    let project = setup_git_repo();
+    let worktree_path = git::create_worktree(project.path(), "omp-symlink").unwrap();
+    let external = TempDir::new().unwrap();
+    std::fs::write(external.path().join("secret.txt"), "outside project").unwrap();
+    std::os::unix::fs::symlink(external.path(), project.path().join(".omp")).unwrap();
+
+    let warnings = git::initialize_worktree(project.path(), &worktree_path, None, None, &[]);
+
+    assert!(
+        !worktree_path.join(".omp").exists(),
+        "a top-level config symlink must not be copied"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains(".omp") && warning.contains("symlink")),
+        "the skipped config symlink should be reported: {warnings:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_initialize_worktree_skips_nested_omp_symlink_but_copies_regular_config() {
+    let project = setup_git_repo();
+    let worktree_path = git::create_worktree(project.path(), "nested-omp-symlink").unwrap();
+    let omp_dir = project.path().join(".omp");
+    std::fs::create_dir(&omp_dir).unwrap();
+    std::fs::write(omp_dir.join("config.toml"), "model = \"regular\"").unwrap();
+
+    let external = TempDir::new().unwrap();
+    std::fs::write(external.path().join("secret.txt"), "outside project").unwrap();
+    std::os::unix::fs::symlink(external.path().join("secret.txt"), omp_dir.join("external"))
+        .unwrap();
+
+    let warnings = git::initialize_worktree(project.path(), &worktree_path, None, None, &[]);
+
+    assert_eq!(
+        std::fs::read_to_string(worktree_path.join(".omp/config.toml")).unwrap(),
+        "model = \"regular\""
+    );
+    assert!(
+        !worktree_path.join(".omp/external").exists(),
+        "a nested config symlink must not be copied"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains(".omp/external") && warning.contains("symlink")),
+        "the skipped nested symlink should be reported: {warnings:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_initialize_worktree_reports_symlinks_in_configured_directories() {
+    let project = setup_git_repo();
+    let worktree_path = git::create_worktree(project.path(), "configured-dir-symlinks").unwrap();
+    let external = TempDir::new().unwrap();
+    std::fs::write(external.path().join("secret.txt"), "outside project").unwrap();
+    std::fs::write(project.path().join("target.txt"), "inside project").unwrap();
+    std::os::unix::fs::symlink(
+        project.path().join("target.txt"),
+        project.path().join("direct-link"),
+    )
+    .unwrap();
+
+    for dir_name in ["plugin-extra", "copied-extra"] {
+        let dir = project.path().join(dir_name);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("regular.txt"), "regular").unwrap();
+        std::os::unix::fs::symlink(external.path().join("secret.txt"), dir.join("external"))
+            .unwrap();
+    }
+
+    let warnings = git::initialize_worktree(
+        project.path(),
+        &worktree_path,
+        Some("copied-extra,direct-link"),
+        None,
+        &["plugin-extra".to_string()],
+    );
+
+    assert!(!worktree_path.join("direct-link").exists());
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("direct-link") && warning.contains("symlink")),
+        "the directly selected symlink should be reported: {warnings:?}"
+    );
+
+    for dir_name in ["plugin-extra", "copied-extra"] {
+        assert!(worktree_path.join(dir_name).join("regular.txt").exists());
+        assert!(!worktree_path.join(dir_name).join("external").exists());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains(&format!("{dir_name}/external"))),
+            "the skipped symlink in {dir_name} should be reported: {warnings:?}"
+        );
     }
 }
 
@@ -1055,7 +1160,10 @@ fn a_repo_with_no_commits_gets_one_so_a_worktree_can_be_cut() {
 
     let branch = git::detect_main_branch(repo).expect("should recover, not fail");
     assert!(!branch.is_empty());
-    assert_ne!(branch, "HEAD", "the literal rev-parse output is not a branch");
+    assert_ne!(
+        branch, "HEAD",
+        "the literal rev-parse output is not a branch"
+    );
 
     // The repo now has exactly one commit, and a worktree can be cut from it.
     let log = Command::new("git")

@@ -77,12 +77,7 @@ impl Agent {
     }
 
     /// Create a configured instance while retaining the base agent's behavior.
-    pub fn named(
-        name: &str,
-        base: &Agent,
-        profile: Option<String>,
-        model: Option<String>,
-    ) -> Self {
+    pub fn named(name: &str, base: &Agent, profile: Option<String>, model: Option<String>) -> Self {
         Self {
             name: name.to_string(),
             base_name: base.base_name().to_string(),
@@ -252,11 +247,11 @@ mod tests {
         assert_eq!(agent.base_name(), "omp");
         assert_eq!(
             agent.build_interactive_command("fix 'this'"),
-            "omp --profile 'team'\"'\"'s profile' --model 'openai/gpt 5' --auto-approve 'fix '\"'\"'this'\"'\"''"
+            "omp --profile 'team'\"'\"'s profile' --model 'openai/gpt 5' --auto-approve --plugin-dir .agtx/omp-plugin 'fix '\"'\"'this'\"'\"''"
         );
         assert_eq!(
             agent.build_resume_command(),
-            "omp --profile 'team'\"'\"'s profile' --model 'openai/gpt 5' --auto-approve --continue"
+            "omp --profile 'team'\"'\"'s profile' --model 'openai/gpt 5' --auto-approve --plugin-dir .agtx/omp-plugin --continue"
         );
 
         let (binary, args) = agent.headless_invocation("describe");

@@ -75,7 +75,7 @@ fn interactive_command_parity_without_prompt() {
             "agy --dangerously-skip-permissions --mode accept-edits",
         ),
         // OMP's approval bypass is independent from Earendil Pi's project trust.
-        ("omp", "omp --auto-approve"),
+        ("omp", "omp --auto-approve --plugin-dir .agtx/omp-plugin"),
         // pi has no permission system to bypass; `--approve` is project trust,
         // without which the worktree's own skills are never loaded.
         ("pi", "pi --approve"),
@@ -106,7 +106,10 @@ fn interactive_command_parity_with_prompt() {
             "antigravity",
             "agy --dangerously-skip-permissions --mode accept-edits -i 'hi'",
         ),
-        ("omp", "omp --auto-approve 'hi'"),
+        (
+            "omp",
+            "omp --auto-approve --plugin-dir .agtx/omp-plugin 'hi'",
+        ),
         ("pi", "pi --approve 'hi'"),
     ];
     for (name, want) in expected {
@@ -157,7 +160,10 @@ fn resume_command_parity() {
             "antigravity",
             "agy --dangerously-skip-permissions --mode accept-edits --continue",
         ),
-        ("omp", "omp --auto-approve --continue"),
+        (
+            "omp",
+            "omp --auto-approve --plugin-dir .agtx/omp-plugin --continue",
+        ),
         ("pi", "pi --approve --continue"),
     ];
     for (name, want) in expected {
@@ -183,11 +189,7 @@ fn headless_invocation_parity() {
         ("grok", "grok", &["-p"]),
         ("antigravity", "agy", &["-p"]),
         // OMP print mode may still use tools, but must not replace the profile session.
-        (
-            "omp",
-            "omp",
-            &["--auto-approve", "--no-session", "--print"],
-        ),
+        ("omp", "omp", &["--auto-approve", "--no-session", "--print"]),
         // `--no-approve`: a one-shot Pi PR description has no use for the repo's
         // own skills or extensions, so it declines them.
         ("pi", "pi", &["--no-approve", "-p"]),
@@ -685,12 +687,7 @@ fn dialog_table() -> Vec<(&'static str, &'static str, Vec<&'static str>, bool)> 
     for agent in AGENTS {
         if let Some(spec) = agtx::agent::spec(agent) {
             for d in spec.dialogs {
-                rows.push((
-                    *agent,
-                    d.patterns[0],
-                    d.answer.to_vec(),
-                    d.security,
-                ));
+                rows.push((*agent, d.patterns[0], d.answer.to_vec(), d.security));
             }
         }
     }
@@ -700,7 +697,12 @@ fn dialog_table() -> Vec<(&'static str, &'static str, Vec<&'static str>, bool)> 
 #[test]
 fn dialog_answers_are_pinned() {
     let expected: Vec<(&str, &str, Vec<&str>, bool)> = vec![
-        ("claude", "Yes, I trust this folder", vec!["1", "Enter"], true),
+        (
+            "claude",
+            "Yes, I trust this folder",
+            vec!["1", "Enter"],
+            true,
+        ),
         ("claude", "Yes, I accept", vec!["2", "Enter"], true),
         (
             "codex",

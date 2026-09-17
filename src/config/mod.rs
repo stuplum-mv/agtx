@@ -336,8 +336,21 @@ fn write_toml_preserving(path: &Path, value: &impl Serialize, managed: &ManagedK
         .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
         .unwrap_or_default();
 
+    let profile_comments = agent_profile_inline_suffix_comments(doc.as_table());
+    expand_agent_profile_tables(doc.as_table_mut());
     merge_table(doc.as_table_mut(), rendered.as_table(), managed);
-    std::fs::write(path, doc.to_string())?;
+    let mut output = doc.to_string();
+    for comment in profile_comments {
+        let comment = comment.trim();
+        if !comment.is_empty() {
+            if !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(comment);
+            output.push('\n');
+        }
+    }
+    std::fs::write(path, output)?;
     Ok(())
 }
 
@@ -409,6 +422,79 @@ fn expand_inline_tables(table: &mut toml_edit::Table) {
     }
 }
 
+/// Normalize only the user-defined profile entries needed for field-wise
+/// merging. Existing configs may express either the root map or an individual
+/// profile as an inline table; leaving either inline would make as_table_mut
+/// fail and replace the profile wholesale, dropping unknown fields.
+fn agent_profile_inline_suffix_comments(table: &toml_edit::Table) -> Vec<String> {
+    let mut comments = Vec::new();
+    let Some(profiles_item) = table.get("agent_profiles") else {
+        return comments;
+    };
+    if let Some(raw) = profiles_item
+        .as_value()
+        .and_then(|value| value.decor().suffix())
+        .and_then(|raw| raw.as_str())
+        .filter(|raw| raw.contains('#'))
+    {
+        comments.push(raw.to_string());
+    }
+    if let Some(profiles) = profiles_item.as_table() {
+        for (_, profile_item) in profiles.iter() {
+            let Some(raw) = profile_item
+                .as_value()
+                .filter(|value| value.is_inline_table())
+                .and_then(|value| value.decor().suffix())
+                .and_then(|raw| raw.as_str())
+                .filter(|raw| raw.contains('#'))
+            else {
+                continue;
+            };
+            comments.push(raw.to_string());
+        }
+    }
+    comments
+}
+
+fn expand_agent_profile_tables(table: &mut toml_edit::Table) {
+    let Some(profiles_item) = table.get_mut("agent_profiles") else {
+        return;
+    };
+    if profiles_item.is_inline_table() {
+        let decor = profiles_item.as_value().map(|value| value.decor().clone());
+        let mut expanded = std::mem::replace(profiles_item, toml_edit::Item::None)
+            .into_table()
+            .expect("an inline table always converts to a table");
+        if let Some(decor) = decor {
+            *expanded.decor_mut() = decor;
+        }
+        expanded.decor_mut().set_suffix("");
+        *profiles_item = toml_edit::Item::Table(expanded);
+    }
+    let Some(profiles) = profiles_item.as_table_mut() else {
+        return;
+    };
+    let inline_profile_names: Vec<String> = profiles
+        .iter()
+        .filter(|(_, item)| item.is_inline_table())
+        .map(|(name, _)| name.to_string())
+        .collect();
+    for profile_name in inline_profile_names {
+        let Some(profile_item) = profiles.get_mut(&profile_name) else {
+            continue;
+        };
+        let decor = profile_item.as_value().map(|value| value.decor().clone());
+        let mut expanded = std::mem::replace(profile_item, toml_edit::Item::None)
+            .into_table()
+            .expect("an inline table always converts to a table");
+        if let Some(decor) = decor {
+            *expanded.decor_mut() = decor;
+        }
+        expanded.decor_mut().set_suffix("");
+        *profile_item = toml_edit::Item::Table(expanded);
+    }
+}
+
 /// The keys a writer is allowed to delete, per table. See
 /// `write_toml_preserving`.
 struct ManagedKeys {
@@ -436,6 +522,38 @@ fn merge_table(target: &mut toml_edit::Table, source: &toml_edit::Table, managed
     merge_table_named(target, source, managed, None);
 }
 
+const AGENT_PROFILE_MANAGED: ManagedKeys = ManagedKeys {
+    root: &["agent", "profile", "model"],
+    nested: &[],
+};
+
+fn merge_agent_profiles(target: &mut toml_edit::Table, source: &toml_edit::Table) {
+    for (profile_name, item) in source.iter() {
+        match (
+            item.as_table(),
+            target
+                .get_mut(profile_name)
+                .and_then(|existing| existing.as_table_mut()),
+        ) {
+            (Some(source_profile), Some(target_profile)) => {
+                merge_table(target_profile, source_profile, &AGENT_PROFILE_MANAGED);
+            }
+            _ => {
+                target.insert(profile_name, item.clone());
+            }
+        }
+    }
+
+    let removed_profiles: Vec<String> = target
+        .iter()
+        .filter(|(profile_name, _)| !source.contains_key(profile_name))
+        .map(|(profile_name, _)| profile_name.to_string())
+        .collect();
+    for profile_name in removed_profiles {
+        remove_key_keeping_comments(target, &profile_name);
+    }
+}
+
 fn merge_table_named(
     target: &mut toml_edit::Table,
     source: &toml_edit::Table,
@@ -443,11 +561,19 @@ fn merge_table_named(
     name: Option<&str>,
 ) {
     for (key, item) in source.iter() {
-        // Profile keys are user-defined. Replace the map as one managed value so
-        // removing a profile does not leave its old table behind.
+        // Profile names are user-defined, but their three known fields are
+        // managed. Merge each profile separately so its comments and unknown
+        // fields survive, then remove names absent from the serialized map.
         if name.is_none() && key == "agent_profiles" {
-            target.insert(key, item.clone());
-            continue;
+            if let (Some(source_profiles), Some(target_profiles)) = (
+                item.as_table(),
+                target
+                    .get_mut(key)
+                    .and_then(|existing| existing.as_table_mut()),
+            ) {
+                merge_agent_profiles(target_profiles, source_profiles);
+                continue;
+            }
         }
         match (
             item.as_table(),
@@ -723,9 +849,9 @@ impl MergedConfig {
         if crate::agent::spec(instance_name).is_some() {
             return Some(instance_name);
         }
-        self.agent_profiles.get(instance_name).and_then(|profile| {
-            crate::agent::spec(&profile.agent).map(|_| profile.agent.as_str())
-        })
+        self.agent_profiles
+            .get(instance_name)
+            .and_then(|profile| crate::agent::spec(&profile.agent).map(|_| profile.agent.as_str()))
     }
 
     /// Resolve an instance name to the base identity used by AgentSpec and plugin manifests.
@@ -745,7 +871,10 @@ impl MergedConfig {
     pub fn resolve_agent_name<'a>(&'a self, requested: &'a str) -> &'a str {
         if self.configured_base_agent_name(requested).is_some() {
             requested
-        } else if self.configured_base_agent_name(&self.default_agent).is_some() {
+        } else if self
+            .configured_base_agent_name(&self.default_agent)
+            .is_some()
+        {
             &self.default_agent
         } else {
             crate::agent::AGENT_SPECS
@@ -1255,5 +1384,128 @@ profile = "project"
         );
         assert_eq!(merged.base_agent_name("omp-work"), "omp");
         assert_eq!(merged.base_agent_name("claude"), "claude");
+    }
+
+    #[test]
+    fn global_profile_save_preserves_comments_unknown_fields_and_clears_known_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"# config header
+
+# profile table comment
+[agent_profiles.work]
+agent = "omp" # keep agent comment
+profile = "old-profile"
+model = "old-model"
+custom_flag = true # keep unknown comment
+"#,
+        )
+        .unwrap();
+
+        let mut config = GlobalConfig::default();
+        config.agent_profiles.insert(
+            "work".into(),
+            AgentProfileConfig {
+                agent: "codex".into(),
+                profile: None,
+                model: Some("gpt-5.4".into()),
+            },
+        );
+        write_toml_preserving(&path, &config, &GLOBAL_MANAGED).unwrap();
+
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# profile table comment"));
+        assert!(saved.contains(r#"agent = "codex" # keep agent comment"#));
+        assert!(saved.contains("custom_flag = true # keep unknown comment"));
+
+        let parsed: toml::Value = toml::from_str(&saved).unwrap();
+        let profile = &parsed["agent_profiles"]["work"];
+        assert_eq!(profile["agent"].as_str(), Some("codex"));
+        assert_eq!(profile["model"].as_str(), Some("gpt-5.4"));
+        assert!(profile.get("profile").is_none());
+        assert_eq!(profile["custom_flag"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn project_profile_save_adds_new_profiles_and_removes_deleted_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join(".agtx");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"[agent_profiles.keep]
+agent = "omp"
+profile = "old"
+
+[agent_profiles.delete]
+agent = "claude"
+"#,
+        )
+        .unwrap();
+
+        let config = ProjectConfig {
+            agent_profiles: Some(BTreeMap::from([
+                (
+                    "keep".into(),
+                    AgentProfileConfig {
+                        agent: "omp".into(),
+                        profile: Some("new".into()),
+                        model: None,
+                    },
+                ),
+                (
+                    "added".into(),
+                    AgentProfileConfig {
+                        agent: "codex".into(),
+                        profile: None,
+                        model: Some("gpt-5.4".into()),
+                    },
+                ),
+            ])),
+            ..ProjectConfig::default()
+        };
+        config.save(dir.path()).unwrap();
+
+        let saved = std::fs::read_to_string(config_dir.join("config.toml")).unwrap();
+        let parsed: toml::Value = toml::from_str(&saved).unwrap();
+        let profiles = parsed["agent_profiles"].as_table().unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles["keep"]["profile"].as_str(), Some("new"));
+        assert_eq!(profiles["added"]["agent"].as_str(), Some("codex"));
+        assert!(!profiles.contains_key("delete"));
+    }
+
+    #[test]
+    fn profile_save_preserves_unknown_fields_from_inline_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"agent_profiles = { work = { agent = "omp", profile = "old", custom_flag = true } } # keep root comment
+"#,
+        )
+        .unwrap();
+
+        let mut config = GlobalConfig::default();
+        config.agent_profiles.insert(
+            "work".into(),
+            AgentProfileConfig {
+                agent: "omp".into(),
+                profile: Some("new".into()),
+                model: Some("cursor/model".into()),
+            },
+        );
+        write_toml_preserving(&path, &config, &GLOBAL_MANAGED).unwrap();
+
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# keep root comment"));
+        let parsed: toml::Value = toml::from_str(&saved).unwrap();
+        let profile = &parsed["agent_profiles"]["work"];
+        assert_eq!(profile["agent"].as_str(), Some("omp"));
+        assert_eq!(profile["profile"].as_str(), Some("new"));
+        assert_eq!(profile["model"].as_str(), Some("cursor/model"));
+        assert_eq!(profile["custom_flag"].as_bool(), Some(true));
     }
 }

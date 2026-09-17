@@ -5177,26 +5177,42 @@ fn test_write_skills_to_worktree_mcp_pi_preserves_existing_config() {
 }
 
 #[test]
-fn test_write_skills_to_worktree_omp_preserves_existing_mcp_config() {
+fn test_write_skills_to_worktree_omp_keeps_project_mcp_config_unchanged() {
+    assert!(!AGTX_WRITTEN_PATHS.contains(&".omp/mcp.json"));
+
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
     let omp_dir = dir.path().join(".omp");
     std::fs::create_dir_all(&omp_dir).unwrap();
-    std::fs::write(
-        omp_dir.join("mcp.json"),
-        r#"{"mcpServers":{"other":{"command":"other"}},"somethingElse":true}"#,
-    )
-    .unwrap();
+    let existing = r#"{"mcpServers":{"other":{"command":"other"}},"somethingElse":true}"#;
+    std::fs::write(omp_dir.join("mcp.json"), existing).unwrap();
 
     write_skills_to_worktree(&wt, dir.path(), &None, &["omp"], false);
 
     assert!(dir.path().join(".omp/skills/agtx-plan/SKILL.md").exists());
-    let content = std::fs::read_to_string(omp_dir.join("mcp.json")).unwrap();
-    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-    assert_eq!(v["mcpServers"]["other"]["command"], "other", "{content}");
-    assert_eq!(v["somethingElse"], true, "{content}");
-    assert!(v["mcpServers"]["agtx"]["command"].is_string());
-    assert_eq!(v["mcpServers"]["agtx"]["args"][0], "mcp-serve");
+    assert_eq!(
+        std::fs::read_to_string(omp_dir.join("mcp.json")).unwrap(),
+        existing,
+        "agtx must not dirty a tracked OMP MCP config"
+    );
+
+    let plugin_dir = dir.path().join(".agtx/omp-plugin");
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(plugin_dir.join("plugin.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["name"], "agtx");
+
+    let mcp: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(plugin_dir.join("mcp.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(mcp["mcpServers"]["agtx"]["type"], "stdio");
+    assert_eq!(mcp["mcpServers"]["agtx"]["command"], "env");
+    assert!(mcp["mcpServers"]["agtx"]["args"][0]
+        .as_str()
+        .is_some_and(|arg| arg.contains("agtx")));
+    assert_eq!(mcp["mcpServers"]["agtx"]["args"][1], "mcp-serve");
 }
 
 #[test]
@@ -8177,6 +8193,85 @@ fn test_transition_to_planning_spawns_background_setup() {
     assert_eq!(result.unwrap(), true);
     // setup_rx should be set (background thread spawned)
     assert!(app.state.setup_rx.is_some());
+}
+
+#[test]
+fn named_omp_profile_switches_resume_in_the_first_cycle() {
+    assert!(should_resume_instance("omp-running", "omp", false));
+    assert!(!should_resume_instance("omp", "omp", false));
+    assert!(!should_resume_instance("codex-review", "codex", false));
+    assert!(should_resume_instance("codex-review", "codex", true));
+    assert!(!should_resume_instance("codex", "codex", true));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn incompatible_destination_agent_blocks_transition() {
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(MockTmuxOperations::new()),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+    app.state.config.agent_profiles.insert(
+        "omp-running".to_string(),
+        crate::config::AgentProfileConfig {
+            agent: "omp".to_string(),
+            profile: Some("running".to_string()),
+            model: None,
+        },
+    );
+    app.state.config.phase_agents.running = Some("omp-running".to_string());
+
+    let mut task = make_test_task("t1", "My task", TaskStatus::Planning);
+    task.plugin = Some("gsd".to_string());
+    task.agent = "claude".to_string();
+
+    let handled = app.transition_to_running(&mut task).unwrap();
+
+    assert!(handled, "the caller must not advance the task status");
+    assert_eq!(task.agent, "claude");
+    assert!(app
+        .state
+        .warning_message
+        .as_ref()
+        .is_some_and(|(message, _)| message.contains("does not support destination agent 'omp'")));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn config_reload_preserves_profiles_used_by_live_tasks() {
+    let mut app = make_test_app();
+    let old_profile = crate::config::AgentProfileConfig {
+        agent: "omp".to_string(),
+        profile: Some("review".to_string()),
+        model: Some("cursor/gpt-5.6-sol".to_string()),
+    };
+    app.state
+        .config
+        .agent_profiles
+        .insert("reviewer".to_string(), old_profile.clone());
+
+    let mut task = make_test_task("t1", "Live review", TaskStatus::Review);
+    task.agent = "reviewer".to_string();
+    task.session_name = Some("test-project:task-t1".to_string());
+    app.state.board.tasks = vec![task];
+
+    let mut reloaded = app.state.config.clone();
+    reloaded.agent_profiles.insert(
+        "reviewer".to_string(),
+        crate::config::AgentProfileConfig {
+            agent: "claude".to_string(),
+            profile: None,
+            model: None,
+        },
+    );
+    app.install_config_for_current_project(reloaded);
+
+    assert_eq!(app.state.config.agent_profiles["reviewer"], old_profile);
+    assert_eq!(app.state.config.base_agent_name("reviewer"), "omp");
 }
 
 // --- transition_to_running ---
@@ -17082,6 +17177,10 @@ fn the_git_exclude_block_is_written_once() {
         .output()
         .unwrap();
 
+    let user_omp = r#"{"mcpServers":{"agtx":{"command":"user-owned"}}}"#;
+    std::fs::create_dir_all(repo.join(".omp")).unwrap();
+    std::fs::write(repo.join(".omp/mcp.json"), user_omp).unwrap();
+
     exclude_agtx_files_from_git(repo);
     let after_first = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
     exclude_agtx_files_from_git(repo);
@@ -17089,6 +17188,115 @@ fn the_git_exclude_block_is_written_once() {
 
     assert_eq!(after_first, after_second);
     assert_eq!(after_second.matches(AGTX_EXCLUDE_MARKER).count(), 1);
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".omp/mcp.json")).unwrap(),
+        user_omp,
+        "an OMP config is migrated only when agtx owns the legacy exclude rule"
+    );
+
+    std::fs::write(
+        repo.join(".git/info/exclude"),
+        format!("{after_second}.omp/mcp.json\n"),
+    )
+    .unwrap();
+    exclude_agtx_files_from_git(repo);
+    let after_cleanup = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+    assert_eq!(
+        after_cleanup,
+        format!("{after_second}.omp/mcp.json\n"),
+        "an identical user rule outside agtx's marked block must survive"
+    );
+}
+
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn legacy_omp_mcp_is_cleaned_before_its_exclude_is_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    std::process::Command::new("git")
+        .current_dir(repo)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+
+    let omp_dir = repo.join(".omp");
+    std::fs::create_dir_all(&omp_dir).unwrap();
+    std::fs::write(
+        omp_dir.join("mcp.json"),
+        r#"{"mcpServers":{"agtx":{"command":"old-agtx"}}}"#,
+    )
+    .unwrap();
+    let exclude = repo.join(".git/info/exclude");
+    std::fs::write(
+        &exclude,
+        format!(
+            "{AGTX_EXCLUDE_MARKER}\ncustom-inside\n.omp/mcp.json\n.omp/skills/agtx-*/\ncustom-outside\n"
+        ),
+    )
+    .unwrap();
+
+    exclude_agtx_files_from_git(repo);
+
+    assert!(!omp_dir.join("mcp.json").exists());
+    let migrated = std::fs::read_to_string(&exclude).unwrap();
+    assert!(!migrated.lines().any(|line| line == ".omp/mcp.json"));
+    assert!(migrated.contains(AGTX_EXCLUDE_END_MARKER));
+    assert!(migrated.lines().any(|line| line == "custom-inside"));
+    assert!(migrated.lines().any(|line| line == "custom-outside"));
+
+    exclude_agtx_files_from_git(repo);
+    assert_eq!(migrated, std::fs::read_to_string(exclude).unwrap());
+}
+
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn malformed_legacy_omp_mcp_stays_excluded() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    std::process::Command::new("git")
+        .current_dir(repo)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+
+    let path = repo.join(".omp/mcp.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let malformed = r#"{"mcpServers":"not-an-object"}"#;
+    std::fs::write(&path, malformed).unwrap();
+    let exclude = repo.join(".git/info/exclude");
+    std::fs::write(
+        &exclude,
+        format!("{AGTX_EXCLUDE_MARKER}\n.omp/mcp.json\n.omp/skills/agtx-*/\n"),
+    )
+    .unwrap();
+
+    exclude_agtx_files_from_git(repo);
+
+    assert_eq!(std::fs::read_to_string(path).unwrap(), malformed);
+    let migrated = std::fs::read_to_string(&exclude).unwrap();
+    assert!(migrated.lines().any(|line| line == ".omp/mcp.json"));
+}
+#[test]
+#[cfg(feature = "test-mocks")]
+fn legacy_omp_mcp_migration_preserves_user_servers_and_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".omp/mcp.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"enabled":true,"mcpServers":{"agtx":{"command":"old-agtx"},"user":{"command":"mine"}}}"#,
+    )
+    .unwrap();
+
+    assert!(migrate_obsolete_omp_mcp(dir.path()));
+
+    let migrated: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(migrated["enabled"], true);
+    assert_eq!(migrated["mcpServers"]["user"]["command"], "mine");
+    assert!(migrated["mcpServers"].get("agtx").is_none());
 }
 
 /// A project that deliberately tracks one of these keeps tracking it: exclude

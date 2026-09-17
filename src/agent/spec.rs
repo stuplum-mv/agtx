@@ -172,8 +172,8 @@ pub enum McpConfigKind {
     AntigravityJsonMerge,
     /// `opencode.json`, whose key is `mcp` and whose entry shape differs.
     OpenCode,
-    /// `.omp/mcp.json` — parsed and merged so project-local servers survive.
-    OmpJsonMerge,
+    /// `.agtx/omp-plugin/mcp.json`, loaded explicitly with `--plugin-dir`.
+    OmpPlugin,
     /// `.pi/mcp.json` — parsed, agtx inserted, written back, so other servers
     /// survive. pi has no MCP client of its own; the `pi-mcp-adapter` package
     /// reads this path as its highest-precedence project layer, and without the
@@ -871,7 +871,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // Verified against omp 18.2.0; selection flags precede unattended flags.
         profile_flag: Some("--profile"),
         model_flag: Some("--model"),
-        base_args: &["--auto-approve"],
+        base_args: &["--auto-approve", "--plugin-dir", ".agtx/omp-plugin"],
         prompt_form: PromptForm::Argv,
         launch_prompt_verified: true,
         resume: ResumeArgs::Append(&["--continue"]),
@@ -882,7 +882,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_layout: SkillLayout::SkillDir,
         skill_scan_dir: Some(".omp/skills"),
         command_syntax: CommandSyntax::PiSkill,
-        mcp_config: Some(McpConfigKind::OmpJsonMerge),
+        mcp_config: Some(McpConfigKind::OmpPlugin),
         // OMP hooks are executable JS/TS modules, not a safely mergeable command config.
         hook_config: None,
         hook_event_source: HookEventSource::Payload,
@@ -1153,14 +1153,17 @@ mod tests {
         assert_eq!(omp.binary, "omp");
         assert_eq!(omp.profile_flag, Some("--profile"));
         assert_eq!(omp.model_flag, Some("--model"));
-        assert_eq!(omp.base_args, &["--auto-approve"]);
+        assert_eq!(
+            omp.base_args,
+            &["--auto-approve", "--plugin-dir", ".agtx/omp-plugin"]
+        );
         assert_eq!(
             omp.headless_args,
             &["--auto-approve", "--no-session", "--print"]
         );
         assert_eq!(omp.skill_dir, Some((".omp/skills", "")));
         assert_eq!(omp.command_syntax, CommandSyntax::PiSkill);
-        assert_eq!(omp.mcp_config, Some(McpConfigKind::OmpJsonMerge));
+        assert_eq!(omp.mcp_config, Some(McpConfigKind::OmpPlugin));
         assert_eq!(omp.process_names, &["omp"]);
         assert!(omp.active_indicators.is_empty());
         assert_eq!(omp.scoped_indicators, &["%/"]);
