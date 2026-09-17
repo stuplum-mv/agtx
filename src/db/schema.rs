@@ -51,9 +51,7 @@ impl Database {
         // Migration: if the new-hash DB doesn't exist, check for an old-hash DB and rename it
         if !db_path.exists() {
             let old_hash = Self::hash_path_legacy(&path_str);
-            let old_db_path = config_dir
-                .join("projects")
-                .join(format!("{}.db", old_hash));
+            let old_db_path = config_dir.join("projects").join(format!("{}.db", old_hash));
             if old_db_path.exists() {
                 let _ = std::fs::rename(&old_db_path, &db_path);
             }
@@ -212,6 +210,9 @@ impl Database {
         let _ = self
             .conn
             .execute("ALTER TABLE tasks ADD COLUMN base_agent TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN session_agent TEXT", []);
         // A task that has never had a session has never been switched, so its
         // `agent` is still the pick it was created with. Any other row's `agent`
         // may be a per-phase override's, and is left to the configured default.
@@ -362,10 +363,15 @@ impl Database {
     // === Task Operations ===
 
     pub fn create_task(&self, task: &Task) -> Result<()> {
+        let session_agent = task
+            .session_agent
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         self.conn.execute(
             r#"
-            INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at, phase_entered_at, base_agent)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+            INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at, phase_entered_at, base_agent, session_agent)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
             "#,
             params![
                 task.id,
@@ -388,6 +394,7 @@ impl Database {
                 task.updated_at.to_rfc3339(),
                 task.phase_entered_at.map(|t| t.to_rfc3339()),
                 task.base_agent,
+                session_agent,
             ],
         )?;
         Ok(())
@@ -396,10 +403,15 @@ impl Database {
     pub fn create_tasks_batch(&mut self, tasks: &[Task]) -> Result<()> {
         let tx = self.conn.transaction()?;
         for task in tasks {
+            let session_agent = task
+                .session_agent
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
             tx.execute(
                 r#"
-                INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at, phase_entered_at, base_agent)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at, phase_entered_at, base_agent, session_agent)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
                 "#,
                 params![
                     task.id,
@@ -422,6 +434,7 @@ impl Database {
                     task.updated_at.to_rfc3339(),
                     task.phase_entered_at.map(|t| t.to_rfc3339()),
                     task.base_agent,
+                    session_agent,
                 ],
             )?;
         }
@@ -438,6 +451,11 @@ impl Database {
     /// SQLite evaluates every `SET` expression against the old row — so the stamp
     /// needs no read first and cannot race one.
     pub fn update_task(&self, task: &Task) -> Result<()> {
+        let session_agent = task
+            .session_agent
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         self.conn.execute(
             r#"
             UPDATE tasks SET
@@ -457,7 +475,8 @@ impl Database {
                 base_branch = ?15,
                 updated_at = ?16,
                 phase_entered_at = CASE WHEN status != ?4 THEN ?17 ELSE phase_entered_at END,
-                base_agent = ?18
+                base_agent = ?18,
+                session_agent = ?19
             WHERE id = ?1
             "#,
             params![
@@ -479,6 +498,7 @@ impl Database {
                 task.updated_at.to_rfc3339(),
                 chrono::Utc::now().to_rfc3339(),
                 task.base_agent,
+                session_agent,
             ],
         )?;
         Ok(())
@@ -501,6 +521,11 @@ impl Database {
             base_agent: row.get("base_agent").ok().flatten(),
             project_id: row.get("project_id")?,
             session_name: row.get("session_name")?,
+            session_agent: row
+                .get::<_, Option<String>>("session_agent")
+                .ok()
+                .flatten()
+                .and_then(|value| serde_json::from_str(&value).ok()),
             worktree_path: row.get("worktree_path")?,
             branch_name: row.get("branch_name").ok().flatten(),
             pr_number: row.get("pr_number").ok().flatten(),

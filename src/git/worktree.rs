@@ -369,7 +369,7 @@ fn first_symlink_component(root: &Path, path: &Path) -> Result<Option<PathBuf>> 
 }
 
 /// Reject any existing symlink at or below the trusted destination root.
-fn ensure_destination_path_safe(root: &Path, path: &Path) -> Result<()> {
+pub(crate) fn ensure_destination_path_safe(root: &Path, path: &Path) -> Result<()> {
     let relative = path.strip_prefix(root).with_context(|| {
         format!(
             "destination '{}' is outside '{}'",

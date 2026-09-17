@@ -55,6 +55,13 @@ impl TaskStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionAgent {
+    pub base_agent: String,
+    pub profile: Option<String>,
+    pub model: Option<String>,
+}
+
 /// A task on the kanban board
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
@@ -74,6 +81,7 @@ pub struct Task {
     pub base_agent: Option<String>,
     pub project_id: String,
     pub session_name: Option<String>,
+    pub session_agent: Option<SessionAgent>,
     pub worktree_path: Option<String>,
     pub branch_name: Option<String>,
     pub pr_number: Option<i32>,
@@ -112,6 +120,7 @@ impl Task {
             agent,
             project_id: project_id.into(),
             session_name: None,
+            session_agent: None,
             worktree_path: None,
             branch_name: None,
             pr_number: None,

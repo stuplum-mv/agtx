@@ -50,6 +50,9 @@ fn seed_repo(dir: &Path) -> String {
     git(&["init", "-q", "-b", "main"]);
     git(&["config", "user.email", "t@example.com"]);
     git(&["config", "user.name", "t"]);
+    // The API promises a unified patch, independent of a user's diff viewer.
+    // A local external command makes that contract explicit in every diff test.
+    git(&["config", "diff.external", "false"]);
     std::fs::write(dir.join("a.txt"), "hello\n").unwrap();
     git(&["add", "-A"]);
     git(&["commit", "-qm", "init"]);
@@ -1759,7 +1762,14 @@ async fn a_pairing_survives_the_server_that_issued_it() {
         StatusCode::OK,
         "the device had to pair again after a restart"
     );
-    assert_eq!(Database::open_global().unwrap().list_mobile_devices().unwrap().len(), 1);
+    assert_eq!(
+        Database::open_global()
+            .unwrap()
+            .list_mobile_devices()
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// `revoke_session_devices` is scoped to one session, which is what would let a
@@ -1845,7 +1855,9 @@ async fn the_legacy_token_is_adopted_once() {
     // The file is gone, so there is exactly one credential path, and a second
     // run is a no-op rather than a duplicate row.
     assert!(!agtx::web::auth::token_path().unwrap().exists());
-    assert!(agtx::web::auth::migrate_legacy_token(None).unwrap().is_none());
+    assert!(agtx::web::auth::migrate_legacy_token(None)
+        .unwrap()
+        .is_none());
     assert_eq!(
         Database::open_global()
             .unwrap()

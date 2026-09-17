@@ -111,7 +111,7 @@ pub fn ref_exists(path: &Path, rev: &str) -> bool {
 pub fn diff_stat(path: &Path, base: &str, target: &str) -> Result<String> {
     let output = Command::new("git")
         .current_dir(path)
-        .args(["diff", base, target, "--stat"])
+        .args(["diff", "--no-ext-diff", base, target, "--stat"])
         .output()
         .context("Failed to get diff")?;
 
@@ -122,7 +122,7 @@ pub fn diff_stat(path: &Path, base: &str, target: &str) -> Result<String> {
 pub fn diff_full(path: &Path, base: &str, target: &str) -> Result<String> {
     let output = Command::new("git")
         .current_dir(path)
-        .args(["diff", base, target])
+        .args(["diff", "--no-ext-diff", base, target])
         .output()
         .context("Failed to get diff")?;
 
@@ -240,8 +240,8 @@ pub fn merge_task_branch(
     match merge_branch(project_path, branch, message) {
         Ok(()) => Ok(MergeOutcome::Merged),
         Err(e) => {
-            let (conflicts, files) = check_merge_conflicts(project_path, base, branch)
-                .unwrap_or((false, Vec::new()));
+            let (conflicts, files) =
+                check_merge_conflicts(project_path, base, branch).unwrap_or((false, Vec::new()));
             if conflicts {
                 Ok(MergeOutcome::Conflicts(files))
             } else {

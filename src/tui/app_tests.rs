@@ -307,6 +307,7 @@ fn test_create_pr_with_content_success() {
         agent: "claude".to_string(),
         base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
+        session_agent: None,
         session_name: Some("test-session".to_string()),
         worktree_path: Some("/tmp/worktree".to_string()),
         branch_name: Some("feature/test".to_string()),
@@ -408,6 +409,7 @@ fn test_create_pr_with_content_no_changes() {
         agent: "claude".to_string(),
         base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
+        session_agent: None,
         session_name: Some("test-session".to_string()),
         worktree_path: Some("/tmp/worktree".to_string()),
         branch_name: Some("feature/test".to_string()),
@@ -468,6 +470,7 @@ fn test_create_pr_with_content_push_failure() {
         agent: "claude".to_string(),
         base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
+        session_agent: None,
         session_name: None,
         worktree_path: Some("/tmp/worktree".to_string()),
         branch_name: Some("feature/test".to_string()),
@@ -534,6 +537,7 @@ fn test_push_changes_to_existing_pr_success() {
         agent: "claude".to_string(),
         base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
+        session_agent: None,
         session_name: Some("test-session".to_string()),
         worktree_path: Some("/tmp/worktree".to_string()),
         branch_name: Some("feature/existing".to_string()),
@@ -591,6 +595,7 @@ fn test_push_changes_to_existing_pr_no_changes() {
         agent: "claude".to_string(),
         base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
+        session_agent: None,
         session_name: None,
         worktree_path: Some("/tmp/worktree".to_string()),
         branch_name: Some("feature/no-changes".to_string()),
@@ -631,6 +636,7 @@ fn test_push_changes_to_existing_pr_no_url() {
         agent: "claude".to_string(),
         base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
+        session_agent: None,
         session_name: None,
         worktree_path: Some("/tmp/worktree".to_string()),
         branch_name: Some("feature/branch".to_string()),
@@ -1062,7 +1068,10 @@ fn the_rate_limit_holds_against_a_paint_and_yields_to_a_keystroke() {
         typist.poke();
     });
     let start = Instant::now();
-    assert_eq!(watch.wait_out_rate_limit(Duration::from_secs(5)), Some(true));
+    assert_eq!(
+        watch.wait_out_rate_limit(Duration::from_secs(5)),
+        Some(true)
+    );
     assert!(
         start.elapsed() < Duration::from_secs(1),
         "a keystroke waited {:?}",
@@ -4773,7 +4782,7 @@ fn test_write_skills_to_worktree_claude() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], false).unwrap();
 
     // Canonical skills
     assert!(dir.path().join(".agtx/skills/agtx-plan/SKILL.md").exists());
@@ -4805,7 +4814,7 @@ fn test_write_skills_to_worktree_gemini_toml() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"], false).unwrap();
 
     let toml_path = dir.path().join(".gemini/commands/agtx/plan.toml");
     assert!(toml_path.exists());
@@ -4827,7 +4836,7 @@ fn test_write_skills_to_worktree_codex() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["codex"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["codex"], false).unwrap();
 
     // Codex uses subdirectories with SKILL.md
     assert!(dir.path().join(".codex/skills/agtx-plan/SKILL.md").exists());
@@ -4842,7 +4851,7 @@ fn test_write_skills_to_worktree_opencode() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"], false).unwrap();
 
     let md_path = dir.path().join(".opencode/command/agtx-plan.md");
     assert!(md_path.exists());
@@ -4858,7 +4867,7 @@ fn test_write_skills_to_worktree_mcp_claude() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], false).unwrap();
 
     let mcp = dir.path().join(".mcp.json");
     assert!(mcp.exists(), ".mcp.json should be written for claude");
@@ -4873,7 +4882,7 @@ fn test_write_skills_to_worktree_mcp_gemini() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"], false).unwrap();
 
     let cfg = dir.path().join(".gemini/settings.json");
     assert!(
@@ -4890,7 +4899,7 @@ fn test_write_skills_to_worktree_mcp_cursor() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], false).unwrap();
 
     let cfg = dir.path().join(".cursor/mcp.json");
     assert!(
@@ -4907,7 +4916,7 @@ fn test_write_skills_to_worktree_mcp_grok() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"], false).unwrap();
 
     let cfg = dir.path().join(".grok/config.toml");
     assert!(cfg.exists(), ".grok/config.toml should be written for grok");
@@ -4928,7 +4937,7 @@ fn test_write_skills_to_worktree_mcp_grok_preserves_existing_config() {
     )
     .unwrap();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"], false).unwrap();
 
     let content = std::fs::read_to_string(grok_dir.join("config.toml")).unwrap();
     assert!(
@@ -4943,7 +4952,7 @@ fn test_write_skills_to_worktree_grok_skills() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"], false).unwrap();
 
     let skill = dir.path().join(".grok/skills/agtx-plan/SKILL.md");
     assert!(
@@ -5112,7 +5121,7 @@ fn test_write_skills_to_worktree_mcp_antigravity() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], false).unwrap();
 
     let cfg = dir.path().join(".agents/mcp_config.json");
     assert!(
@@ -5130,7 +5139,7 @@ fn test_write_skills_to_worktree_pi() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"], false).unwrap();
 
     // pi discovers `.pi/skills/<name>/SKILL.md`, and only once the project is
     // trusted — which is what the `--approve` in its launch args buys.
@@ -5161,7 +5170,7 @@ fn test_write_skills_to_worktree_mcp_pi_preserves_existing_config() {
     )
     .unwrap();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"], false).unwrap();
 
     let content = std::fs::read_to_string(pi_dir.join("mcp.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -5187,7 +5196,7 @@ fn test_write_skills_to_worktree_omp_keeps_project_mcp_config_unchanged() {
     let existing = r#"{"mcpServers":{"other":{"command":"other"}},"somethingElse":true}"#;
     std::fs::write(omp_dir.join("mcp.json"), existing).unwrap();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["omp"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["omp"], false).unwrap();
 
     assert!(dir.path().join(".omp/skills/agtx-plan/SKILL.md").exists());
     assert_eq!(
@@ -5197,16 +5206,14 @@ fn test_write_skills_to_worktree_omp_keeps_project_mcp_config_unchanged() {
     );
 
     let plugin_dir = dir.path().join(".agtx/omp-plugin");
-    let manifest: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(plugin_dir.join("plugin.json")).unwrap(),
-    )
-    .unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(plugin_dir.join("plugin.json")).unwrap())
+            .unwrap();
     assert_eq!(manifest["name"], "agtx");
 
-    let mcp: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(plugin_dir.join("mcp.json")).unwrap(),
-    )
-    .unwrap();
+    let mcp: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(plugin_dir.join("mcp.json")).unwrap())
+            .unwrap();
     assert_eq!(mcp["mcpServers"]["agtx"]["type"], "stdio");
     assert_eq!(mcp["mcpServers"]["agtx"]["command"], "env");
     assert!(mcp["mcpServers"]["agtx"]["args"][0]
@@ -5227,7 +5234,7 @@ fn test_write_skills_to_worktree_mcp_antigravity_preserves_existing_config() {
     )
     .unwrap();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], false).unwrap();
 
     let content = std::fs::read_to_string(agents_dir.join("mcp_config.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -5250,7 +5257,7 @@ fn test_write_skills_to_worktree_mcp_antigravity_replaces_malformed_config() {
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(agents_dir.join("mcp_config.json"), "not json at all").unwrap();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], false).unwrap();
 
     let content = std::fs::read_to_string(agents_dir.join("mcp_config.json")).unwrap();
     let v: serde_json::Value =
@@ -5263,7 +5270,7 @@ fn test_write_skills_to_worktree_antigravity_skills() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], false).unwrap();
 
     let skill = dir.path().join(".agents/skills/agtx-plan/SKILL.md");
     assert!(
@@ -5285,7 +5292,7 @@ fn test_write_skills_to_worktree_mcp_codex() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["codex"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["codex"], false).unwrap();
 
     let cfg = dir.path().join(".codex/config.toml");
     assert!(
@@ -5302,7 +5309,7 @@ fn test_write_skills_to_worktree_mcp_opencode() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"], false).unwrap();
 
     let cfg = dir.path().join("opencode.json");
     assert!(cfg.exists(), "opencode.json should be written for opencode");
@@ -8242,21 +8249,16 @@ fn incompatible_destination_agent_blocks_transition() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn config_reload_preserves_profiles_used_by_live_tasks() {
+fn config_reload_updates_new_launches_without_reinterpreting_live_sessions() {
     let mut app = make_test_app();
-    let old_profile = crate::config::AgentProfileConfig {
-        agent: "omp".to_string(),
-        profile: Some("review".to_string()),
-        model: Some("cursor/gpt-5.6-sol".to_string()),
-    };
-    app.state
-        .config
-        .agent_profiles
-        .insert("reviewer".to_string(), old_profile.clone());
-
     let mut task = make_test_task("t1", "Live review", TaskStatus::Review);
     task.agent = "reviewer".to_string();
     task.session_name = Some("test-project:task-t1".to_string());
+    task.session_agent = Some(SessionAgent {
+        base_agent: "omp".to_string(),
+        profile: Some("review".to_string()),
+        model: Some("cursor/gpt-5.6-sol".to_string()),
+    });
     app.state.board.tasks = vec![task];
 
     let mut reloaded = app.state.config.clone();
@@ -8270,11 +8272,107 @@ fn config_reload_preserves_profiles_used_by_live_tasks() {
     );
     app.install_config_for_current_project(reloaded);
 
-    assert_eq!(app.state.config.agent_profiles["reviewer"], old_profile);
-    assert_eq!(app.state.config.base_agent_name("reviewer"), "omp");
+    assert_eq!(app.state.config.base_agent_name("reviewer"), "claude");
+    let task = &app.state.board.tasks[0];
+    assert_eq!(current_session_base_agent(task, &app.state.config), "omp");
+    assert_eq!(
+        operations_for_task_session(task, app.state.agent_registry.as_ref())
+            .build_resume_command(),
+        "omp --profile 'review' --model 'cursor/gpt-5.6-sol' --auto-approve --plugin-dir .agtx/omp-plugin --continue"
+    );
+}
+
+#[test]
+fn unchanged_instance_keeps_its_persisted_session_profile() {
+    let mut config = make_test_app().state.config.clone();
+    config.agent_profiles.insert(
+        "reviewer".to_string(),
+        crate::config::AgentProfileConfig {
+            agent: "claude".to_string(),
+            profile: None,
+            model: None,
+        },
+    );
+    let mut task = make_test_task("t1", "Live review", TaskStatus::Review);
+    task.agent = "reviewer".to_string();
+    task.session_agent = Some(SessionAgent {
+        base_agent: "omp".to_string(),
+        profile: Some("review".to_string()),
+        model: Some("cursor/gpt-5.6-sol".to_string()),
+    });
+
+    assert_eq!(
+        session_agent_for_target(&config, &task, "reviewer"),
+        task.session_agent.unwrap()
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn refresh_backfills_live_sessions_created_before_snapshots_existed() {
+    let mut app = make_test_app();
+    app.state.config.agent_profiles.insert(
+        "reviewer".to_string(),
+        crate::config::AgentProfileConfig {
+            agent: "omp".to_string(),
+            profile: Some("review".to_string()),
+            model: Some("cursor/gpt-5.6-sol".to_string()),
+        },
+    );
+    let mut task = make_test_task("t1", "Legacy live review", TaskStatus::Review);
+    task.agent = "reviewer".to_string();
+    task.session_name = Some("test-project:task-t1".to_string());
+    app.state.db.as_ref().unwrap().create_task(&task).unwrap();
+
+    app.refresh_tasks().unwrap();
+
+    assert_eq!(
+        app.state.board.tasks[0].session_agent,
+        Some(SessionAgent {
+            base_agent: "omp".to_string(),
+            profile: Some("review".to_string()),
+            model: Some("cursor/gpt-5.6-sol".to_string()),
+        })
+    );
 }
 
 // --- transition_to_running ---
+
+#[test]
+#[cfg(all(feature = "test-mocks", unix))]
+fn failed_switch_deployment_does_not_advance_agent_state() {
+    use std::os::unix::fs::symlink;
+
+    let mut app = make_test_app();
+    app.state.config.agent_profiles.insert(
+        "omp-running".to_string(),
+        crate::config::AgentProfileConfig {
+            agent: "omp".to_string(),
+            profile: Some("running".to_string()),
+            model: None,
+        },
+    );
+    app.state.config.phase_agents.running = Some("omp-running".to_string());
+    let worktree = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(worktree.path().join(".omp")).unwrap();
+    symlink(outside.path(), worktree.path().join(".omp/skills")).unwrap();
+
+    let mut task = make_test_task("t1", "Atomic switch", TaskStatus::Planning);
+    task.agent = "claude".to_string();
+    task.session_name = Some("test-project:task-t1".to_string());
+    task.worktree_path = Some(worktree.path().to_string_lossy().into_owned());
+    task.session_agent = Some(SessionAgent {
+        base_agent: "claude".to_string(),
+        profile: None,
+        model: None,
+    });
+
+    assert!(app.transition_to_running(&mut task).is_err());
+    assert_eq!(task.agent, "claude");
+    assert_eq!(task.session_agent.as_ref().unwrap().base_agent, "claude");
+    assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+}
 
 #[test]
 #[cfg(feature = "test-mocks")]
@@ -8556,6 +8654,7 @@ fn make_session_task_status(
         worktree_path: None,
         session_name: None,
         agent: "claude".to_string(),
+        base_agent: "claude".to_string(),
         was_ready,
     }
 }
@@ -8702,6 +8801,7 @@ fn refresh_with_hook(
             worktree_path: None,
             session_name: None,
             agent: "claude".to_string(),
+            base_agent: "claude".to_string(),
             was_ready: false,
         }],
     };
@@ -8826,6 +8926,7 @@ fn test_ready_artifact_outranks_a_working_hook() {
             worktree_path: None,
             session_name: None,
             agent: "claude".to_string(),
+            base_agent: "claude".to_string(),
             was_ready: false,
         }],
     };
@@ -8854,6 +8955,7 @@ fn test_apply_session_refresh_working_becomes_idle_after_15s() {
             worktree_path: None,
             session_name: None,
             agent: "claude".to_string(),
+            base_agent: "claude".to_string(),
             was_ready: false,
         }],
     };
@@ -8883,6 +8985,7 @@ fn test_apply_session_refresh_working_stays_working_hash_changed() {
             worktree_path: None,
             session_name: None,
             agent: "claude".to_string(),
+            base_agent: "claude".to_string(),
             was_ready: false,
         }],
     };
@@ -12558,7 +12661,7 @@ fn test_write_skills_to_worktree_cursor() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], false).unwrap();
 
     // Cursor uses subdirectories with SKILL.md (same structure as Codex)
     assert!(
@@ -13460,7 +13563,7 @@ fn dep_scroll_zero_visible_treated_as_one() {
 fn test_write_skills_emits_a_valid_claude_hook_config() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true).unwrap();
 
     let raw = std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -13500,7 +13603,7 @@ fn test_write_skills_emits_a_valid_claude_hook_config() {
 fn test_agent_hooks_false_writes_no_hooks() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], false).unwrap();
 
     let raw = std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -13537,7 +13640,7 @@ fn test_hook_config_is_written_for_every_hook_capable_agent() {
         }
         let dir = tempfile::tempdir().unwrap();
         let wt = dir.path().to_string_lossy().to_string();
-        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true);
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true).unwrap();
 
         let raw = std::fs::read_to_string(dir.path().join(rel))
             .unwrap_or_else(|e| panic!("{name}: no hook config at {rel}: {e}"));
@@ -13563,7 +13666,7 @@ fn test_gemini_hooks_merge_with_existing_settings() {
     )
     .unwrap();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"], true).unwrap();
     let v: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join(".gemini/settings.json")).unwrap(),
     )
@@ -13597,9 +13700,9 @@ fn test_redeploying_hooks_is_idempotent_for_every_agent() {
         }
         let dir = tempfile::tempdir().unwrap();
         let wt = dir.path().to_string_lossy().to_string();
-        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true);
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true).unwrap();
         let once = read_all_configs(dir.path());
-        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true);
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true).unwrap();
         let twice = read_all_configs(dir.path());
         assert_eq!(once, twice, "{name}: second deploy changed the config");
     }
@@ -13638,7 +13741,7 @@ fn test_antigravity_hooks_preserve_a_projects_own_hooks() {
     )
     .unwrap();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], true).unwrap();
     let v: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join(".agents/hooks.json")).unwrap(),
     )
@@ -13670,7 +13773,7 @@ fn test_antigravity_hooks_preserve_a_projects_own_hooks() {
 fn test_cursor_hooks_carry_the_version_envelope() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
-    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true).unwrap();
     let v: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap(),
     )
@@ -13689,7 +13792,7 @@ fn test_agent_hooks_false_writes_no_hooks_for_any_agent() {
     for name in ["claude", "gemini", "cursor", "grok", "antigravity"] {
         let dir = tempfile::tempdir().unwrap();
         let wt = dir.path().to_string_lossy().to_string();
-        write_skills_to_worktree(&wt, dir.path(), &None, &[name], false);
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], false).unwrap();
         for (rel, body) in read_all_configs(dir.path()) {
             assert!(
                 !body.contains("hook --env"),
@@ -13729,7 +13832,7 @@ fn test_cursor_hooks_preserve_a_projects_own_hooks() {
     )
     .unwrap();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true).unwrap();
     let v: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap(),
     )
@@ -13755,8 +13858,8 @@ fn test_cursor_hooks_preserve_a_projects_own_hooks() {
 fn test_cursor_hooks_do_not_accumulate_across_deploys() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
-    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
-    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true).unwrap();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true).unwrap();
     let v: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap(),
     )
@@ -13772,7 +13875,7 @@ fn test_turning_hooks_off_unregisters_an_existing_worktree() {
     for name in ["claude", "gemini", "cursor", "grok", "antigravity"] {
         let dir = tempfile::tempdir().unwrap();
         let wt = dir.path().to_string_lossy().to_string();
-        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true);
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true).unwrap();
         assert!(
             read_all_configs(dir.path())
                 .iter()
@@ -13780,7 +13883,7 @@ fn test_turning_hooks_off_unregisters_an_existing_worktree() {
             "{name}: nothing was deployed to un-deploy"
         );
 
-        write_skills_to_worktree(&wt, dir.path(), &None, &[name], false);
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], false).unwrap();
         for (rel, body) in read_all_configs(dir.path()) {
             assert!(
                 !body.contains("hook --env"),
@@ -13803,8 +13906,8 @@ fn test_turning_hooks_off_leaves_the_users_own_hooks() {
         r#"{"version":1,"hooks":{"stop":[{"command":"./mine.sh"}]}}"#,
     )
     .unwrap();
-    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
-    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true).unwrap();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], false).unwrap();
 
     let v: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap(),
@@ -14175,7 +14278,7 @@ fn test_write_skills_preserves_existing_claude_settings() {
     .unwrap();
 
     let wt = dir.path().to_string_lossy().to_string();
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true).unwrap();
 
     let raw = std::fs::read_to_string(claude.join("settings.local.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -14210,9 +14313,9 @@ fn test_write_skills_is_idempotent_for_hooks() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true).unwrap();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true).unwrap();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true).unwrap();
 
     let raw = std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -14237,7 +14340,7 @@ fn test_write_skills_survives_corrupt_claude_settings() {
     std::fs::write(claude.join("settings.local.json"), "{ not json").unwrap();
 
     let wt = dir.path().to_string_lossy().to_string();
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true).unwrap();
 
     let raw = std::fs::read_to_string(claude.join("settings.local.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -14255,8 +14358,8 @@ fn test_skip_worktree_tasks_share_one_task_agnostic_hook() {
     let root = dir.path().to_string_lossy().to_string();
 
     // Two tasks, same "worktree" (the project root).
-    write_skills_to_worktree(&root, dir.path(), &None, &["claude"], true);
-    write_skills_to_worktree(&root, dir.path(), &None, &["claude"], true);
+    write_skills_to_worktree(&root, dir.path(), &None, &["claude"], true).unwrap();
+    write_skills_to_worktree(&root, dir.path(), &None, &["claude"], true).unwrap();
 
     let raw = std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -14285,7 +14388,7 @@ fn test_skip_worktree_tasks_share_one_task_agnostic_hook() {
 fn test_deploy_writes_a_binary_marker() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true).unwrap();
 
     let marker = read_deploy_marker(dir.path()).expect("marker missing");
     let current = std::env::current_exe()
@@ -14313,7 +14416,7 @@ fn test_hooks_are_replaced_not_duplicated_after_the_binary_moves() {
     .unwrap();
 
     let wt = dir.path().to_string_lossy().to_string();
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true).unwrap();
 
     let raw = std::fs::read_to_string(claude.join("settings.local.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -14346,7 +14449,7 @@ fn test_is_agtx_hook_command_ignores_unrelated_hooks() {
 fn test_claude_settings_preflight_bypass_acceptance() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true).unwrap();
 
     let raw = std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -14404,7 +14507,7 @@ fn test_write_skills_to_worktree_writes_no_mcp_config_for_copilot() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["copilot"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["copilot"], false).unwrap();
 
     // Its skills still deploy — only the MCP wiring is absent.
     assert!(dir.path().join(".github/agents/agtx/plan.md").exists());
@@ -14434,8 +14537,7 @@ fn test_agent_commands_derivation_matches_the_previous_literals() {
     let mut got: Vec<&str> = AGENT_COMMANDS.to_vec();
     got.sort_unstable();
     let mut want = vec![
-        "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "agy",
-        "omp",
+        "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "agy", "omp",
         // pi. Only fires on Linux — macOS fixes `p_comm` at exec, so the pane
         // reports `node` and pi's scoped indicator does the detecting there.
         // `node` itself must never join this list: it is every Ink agent's pane
@@ -15098,6 +15200,7 @@ fn test_awaiting_trust_forces_blocked_over_working() {
             worktree_path: None,
             session_name: None,
             agent: "claude".to_string(),
+            base_agent: "claude".to_string(),
             was_ready: false,
         }],
     };
@@ -15135,6 +15238,7 @@ fn test_trust_block_clears_once_the_dialog_is_gone() {
             worktree_path: None,
             session_name: None,
             agent: "claude".to_string(),
+            base_agent: "claude".to_string(),
             was_ready: false,
         }],
     };
@@ -16545,7 +16649,11 @@ fn a_queued_task_that_left_backlog_resolves_its_request_with_an_error() {
         .unwrap();
     assert!(stored.processed_at.is_some());
     assert!(
-        stored.error.as_deref().unwrap_or_default().contains("Backlog"),
+        stored
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Backlog"),
         "the error says what changed: {:?}",
         stored.error
     );
@@ -16610,7 +16718,10 @@ fn a_conflicting_merge_leaves_the_task_in_review_with_a_note() {
     app.state.db.as_ref().unwrap().create_task(&task).unwrap();
 
     let req = TransitionRequest::new(&task.id, "move_to_done_and_merge");
-    let err = app.execute_transition_request(&req).unwrap_err().to_string();
+    let err = app
+        .execute_transition_request(&req)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("conflicts"), "{err}");
     assert!(err.contains("README.md"), "{err}");
 
@@ -16669,7 +16780,10 @@ fn merging_into_a_checkout_on_the_wrong_branch_is_refused_and_changes_nothing() 
     app.state.db.as_ref().unwrap().create_task(&task).unwrap();
 
     let req = TransitionRequest::new(&task.id, "move_to_done_and_merge");
-    let err = app.execute_transition_request(&req).unwrap_err().to_string();
+    let err = app
+        .execute_transition_request(&req)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("user-was-here"), "{err}");
     assert!(err.contains("Nothing was changed"), "{err}");
 
@@ -16711,11 +16825,17 @@ fn cleanup_reaps_pane_descendants_before_killing_the_window() {
 
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_pane_pid().times(1).returning(|_| {
-        PANE_PID_AT.store(SEQ.fetch_add(1, AtomicOrdering::SeqCst), AtomicOrdering::SeqCst);
+        PANE_PID_AT.store(
+            SEQ.fetch_add(1, AtomicOrdering::SeqCst),
+            AtomicOrdering::SeqCst,
+        );
         None
     });
     mock_tmux.expect_kill_window().times(1).returning(|_| {
-        KILL_AT.store(SEQ.fetch_add(1, AtomicOrdering::SeqCst), AtomicOrdering::SeqCst);
+        KILL_AT.store(
+            SEQ.fetch_add(1, AtomicOrdering::SeqCst),
+            AtomicOrdering::SeqCst,
+        );
         Ok(())
     });
 
@@ -16761,7 +16881,10 @@ fn a_root_pid_is_refused_rather_than_reaped() {
 
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_pane_pid().times(1).returning(|_| Some(0));
-    mock_tmux.expect_kill_window().times(1).returning(|_| Ok(()));
+    mock_tmux
+        .expect_kill_window()
+        .times(1)
+        .returning(|_| Ok(()));
     let mut mock_git = MockGitOperations::new();
     mock_git
         .expect_remove_worktree()
@@ -16842,7 +16965,13 @@ fn a_second_resume_moves_the_marker_forward() {
     mark_reviewed_point(&task);
     let first = std::fs::read_to_string(wt.join(".agtx").join(REVIEWED_AT_FILE)).unwrap();
 
-    git(&["commit", "-q", "--allow-empty", "-m", "addressed the feedback"]);
+    git(&[
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "addressed the feedback",
+    ]);
     mark_reviewed_point(&task);
     let second = std::fs::read_to_string(wt.join(".agtx").join(REVIEWED_AT_FILE)).unwrap();
 
@@ -16947,7 +17076,10 @@ fn refusing_a_merge_names_the_merge_and_the_way_out() {
     app.state.db.as_ref().unwrap().create_task(&task).unwrap();
 
     let req = TransitionRequest::new(&task.id, "move_to_done_and_merge");
-    let err = app.execute_transition_request(&req).unwrap_err().to_string();
+    let err = app
+        .execute_transition_request(&req)
+        .unwrap_err()
+        .to_string();
 
     assert!(err.contains("merge"), "names the action asked for: {err}");
     assert!(err.contains("running"), "names the state it is in: {err}");
@@ -17053,10 +17185,16 @@ fn merging_an_empty_branch_refuses_instead_of_reaching_done() {
     app.state.db.as_ref().unwrap().create_task(&task).unwrap();
 
     let req = TransitionRequest::new(&task.id, "move_to_done_and_merge");
-    let err = app.execute_transition_request(&req).unwrap_err().to_string();
+    let err = app
+        .execute_transition_request(&req)
+        .unwrap_err()
+        .to_string();
 
     assert!(err.contains("no commits"), "{err}");
-    assert!(err.contains("uncommitted"), "says where the work would be: {err}");
+    assert!(
+        err.contains("uncommitted"),
+        "says where the work would be: {err}"
+    );
     let stored = app
         .state
         .db
@@ -17067,8 +17205,6 @@ fn merging_an_empty_branch_refuses_instead_of_reaching_done() {
         .unwrap();
     assert_eq!(stored.status, TaskStatus::Review);
 }
-
-
 
 /// The parse behind `processes_for_task`. Split out because whether `ps` will
 /// expose another process's environment depends on the platform and on how the
@@ -17128,12 +17264,21 @@ fn task_id_lookup_survives_junk_input() {
 fn agtx_files_are_hidden_from_git_in_a_worktree() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
+    let global_excludes = repo.join("nonexistent-global-excludes");
     let git = |cwd: &std::path::Path, args: &[&str]| {
-        std::process::Command::new("git")
+        let output = std::process::Command::new("git")
             .current_dir(cwd)
+            .arg("-c")
+            .arg(format!("core.excludesFile={}", global_excludes.display()))
             .args(args)
             .output()
-            .unwrap()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
     };
     git(repo, &["init", "-q"]);
     git(repo, &["config", "user.email", "t@t.com"]);
@@ -17150,7 +17295,10 @@ fn agtx_files_are_hidden_from_git_in_a_worktree() {
     let dirty = |p: &std::path::Path| {
         String::from_utf8_lossy(&git(p, &["status", "--porcelain"]).stdout).to_string()
     };
-    assert!(!dirty(&wt).is_empty(), "precondition: agtx files show as noise");
+    assert!(
+        !dirty(&wt).is_empty(),
+        "precondition: agtx files show as noise"
+    );
 
     exclude_agtx_files_from_git(&wt);
 
@@ -17208,7 +17356,6 @@ fn the_git_exclude_block_is_written_once() {
     );
 }
 
-
 #[test]
 #[cfg(feature = "test-mocks")]
 fn legacy_omp_mcp_is_cleaned_before_its_exclude_is_removed() {
@@ -17224,7 +17371,15 @@ fn legacy_omp_mcp_is_cleaned_before_its_exclude_is_removed() {
     std::fs::create_dir_all(&omp_dir).unwrap();
     std::fs::write(
         omp_dir.join("mcp.json"),
-        r#"{"mcpServers":{"agtx":{"command":"old-agtx"}}}"#,
+        serde_json::to_string(&serde_json::json!({
+            "mcpServers": {
+                "agtx": {
+                    "command": "/usr/local/bin/agtx",
+                    "args": ["mcp-serve", repo]
+                }
+            }
+        }))
+        .unwrap(),
     )
     .unwrap();
     let exclude = repo.join(".git/info/exclude");
@@ -17248,7 +17403,6 @@ fn legacy_omp_mcp_is_cleaned_before_its_exclude_is_removed() {
     exclude_agtx_files_from_git(repo);
     assert_eq!(migrated, std::fs::read_to_string(exclude).unwrap());
 }
-
 
 #[test]
 #[cfg(feature = "test-mocks")]
@@ -17286,17 +17440,206 @@ fn legacy_omp_mcp_migration_preserves_user_servers_and_fields() {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(
         &path,
-        r#"{"enabled":true,"mcpServers":{"agtx":{"command":"old-agtx"},"user":{"command":"mine"}}}"#,
+        serde_json::to_string(&serde_json::json!({
+            "enabled": true,
+            "mcpServers": {
+                "agtx": {
+                    "command": "/usr/local/bin/agtx",
+                    "args": ["mcp-serve", dir.path()]
+                },
+                "user": {"command": "mine"}
+            }
+        }))
+        .unwrap(),
     )
     .unwrap();
 
-    assert!(migrate_obsolete_omp_mcp(dir.path()));
+    assert!(migrate_obsolete_omp_mcp(dir.path(), dir.path()));
 
     let migrated: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     assert_eq!(migrated["enabled"], true);
     assert_eq!(migrated["mcpServers"]["user"]["command"], "mine");
     assert!(migrated["mcpServers"].get("agtx").is_none());
+}
+
+#[test]
+#[cfg(all(feature = "test-mocks", unix))]
+fn managed_skill_deployment_refuses_symlinked_destinations() {
+    use std::os::unix::fs::symlink;
+
+    let worktree = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(worktree.path().join(".omp")).unwrap();
+    symlink(outside.path(), worktree.path().join(".omp/skills")).unwrap();
+
+    let result = write_skills_to_worktree(
+        &worktree.path().to_string_lossy(),
+        worktree.path(),
+        &None,
+        &["omp"],
+        false,
+    );
+
+    assert!(result.is_err());
+    assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    assert!(!worktree.path().join(".agtx").exists());
+}
+
+#[test]
+#[cfg(all(feature = "test-mocks", unix))]
+fn non_omp_deployment_refuses_symlinked_skill_destinations() {
+    use std::os::unix::fs::symlink;
+
+    let worktree = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(worktree.path().join(".claude")).unwrap();
+    symlink(outside.path(), worktree.path().join(".claude/commands")).unwrap();
+
+    let result = ensure_deployment_paths_safe(worktree.path(), &["claude"]);
+
+    assert!(result.is_err());
+    assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn legacy_omp_migration_covers_every_registered_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    let git = |cwd: &Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@t.com"]);
+    git(repo, &["config", "user.name", "T"]);
+    git(repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(repo, &["worktree", "add", "-q", "wt", "-b", "feat"]);
+    let second = repo.join("wt");
+
+    for worktree in [repo, second.as_path()] {
+        std::fs::create_dir_all(worktree.join(".omp")).unwrap();
+        std::fs::write(
+            worktree.join(".omp/mcp.json"),
+            serde_json::to_string(&serde_json::json!({
+                "mcpServers": {
+                    "agtx": {
+                        "command": "/usr/local/bin/agtx",
+                        "args": ["mcp-serve", repo]
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let exclude = repo.join(".git/info/exclude");
+    std::fs::write(
+        &exclude,
+        format!("{AGTX_EXCLUDE_MARKER}\n.omp/mcp.json\n.omp/skills/agtx-*/\n"),
+    )
+    .unwrap();
+
+    exclude_agtx_files_from_git(repo);
+
+    assert!(!repo.join(".omp/mcp.json").exists());
+    assert!(!second.join(".omp/mcp.json").exists());
+    assert!(!std::fs::read_to_string(exclude)
+        .unwrap()
+        .contains(".omp/mcp.json"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn legacy_omp_migration_does_not_stop_after_an_unmigratable_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    let git = |cwd: &Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@t.com"]);
+    git(repo, &["config", "user.name", "T"]);
+    git(repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(repo, &["worktree", "add", "-q", "wt", "-b", "feat"]);
+    let second = repo.join("wt");
+
+    std::fs::create_dir_all(repo.join(".omp")).unwrap();
+    std::fs::write(repo.join(".omp/mcp.json"), "not json").unwrap();
+    std::fs::create_dir_all(second.join(".omp")).unwrap();
+    std::fs::write(
+        second.join(".omp/mcp.json"),
+        serde_json::to_string(&serde_json::json!({
+            "mcpServers": {
+                "agtx": {
+                    "command": "/usr/local/bin/agtx",
+                    "args": ["mcp-serve", repo]
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert!(!migrate_all_obsolete_omp_mcp(repo));
+    assert!(repo.join(".omp/mcp.json").exists());
+    assert!(!second.join(".omp/mcp.json").exists());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn legacy_omp_migration_preserves_an_unowned_agtx_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    std::process::Command::new("git")
+        .current_dir(repo)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    let path = repo.join(".omp/mcp.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let user_config = serde_json::json!({
+        "mcpServers": {
+            "agtx": {
+                "command": "/usr/local/bin/custom-agtx",
+                "args": ["mcp-serve", repo]
+            }
+        }
+    });
+    std::fs::write(&path, serde_json::to_string(&user_config).unwrap()).unwrap();
+    let exclude = repo.join(".git/info/exclude");
+    std::fs::write(
+        &exclude,
+        format!("{AGTX_EXCLUDE_MARKER}\n.omp/mcp.json\n.omp/skills/agtx-*/\n"),
+    )
+    .unwrap();
+
+    exclude_agtx_files_from_git(repo);
+
+    let preserved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(preserved, user_config);
+    assert!(std::fs::read_to_string(exclude)
+        .unwrap()
+        .contains(".omp/mcp.json"));
 }
 
 /// A project that deliberately tracks one of these keeps tracking it: exclude
@@ -17308,12 +17651,21 @@ fn legacy_omp_mcp_migration_preserves_user_servers_and_fields() {
 fn the_exclude_cannot_hide_a_file_the_project_tracks() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
+    let global_excludes = repo.join("nonexistent-global-excludes");
     let git = |args: &[&str]| {
-        std::process::Command::new("git")
+        let output = std::process::Command::new("git")
             .current_dir(repo)
+            .arg("-c")
+            .arg(format!("core.excludesFile={}", global_excludes.display()))
             .args(args)
             .output()
-            .unwrap()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
     };
     git(&["init", "-q"]);
     git(&["config", "user.email", "t@t.com"]);
@@ -17370,11 +17722,23 @@ fn an_artifact_from_before_the_phase_began_does_not_count() {
     let now = chrono::Utc::now();
 
     assert!(
-        phase_artifact_fresh(wt, TaskStatus::Running, &plugin, 1, Some(now - chrono::Duration::seconds(60))),
+        phase_artifact_fresh(
+            wt,
+            TaskStatus::Running,
+            &plugin,
+            1,
+            Some(now - chrono::Duration::seconds(60))
+        ),
         "written after the phase began: counts"
     );
     assert!(
-        !phase_artifact_fresh(wt, TaskStatus::Running, &plugin, 1, Some(now + chrono::Duration::seconds(60))),
+        !phase_artifact_fresh(
+            wt,
+            TaskStatus::Running,
+            &plugin,
+            1,
+            Some(now + chrono::Duration::seconds(60))
+        ),
         "written before the phase began — the previous cycle's — must not count"
     );
     assert!(
@@ -17394,16 +17758,31 @@ fn an_artifact_from_before_the_phase_began_does_not_count() {
 fn ready_waits_for_the_turn_to_end() {
     use crate::agent::hook_status::HookState;
     let gate = gate_ready_on_turn;
-    assert_eq!(gate(PhaseStatus::Ready, Some(HookState::Working)), PhaseStatus::Working);
-    assert_eq!(gate(PhaseStatus::Ready, Some(HookState::Blocked)), PhaseStatus::Working);
-    assert_eq!(gate(PhaseStatus::Ready, Some(HookState::Waiting)), PhaseStatus::Ready);
-    assert_eq!(gate(PhaseStatus::Ready, Some(HookState::Ended)), PhaseStatus::Ready);
+    assert_eq!(
+        gate(PhaseStatus::Ready, Some(HookState::Working)),
+        PhaseStatus::Working
+    );
+    assert_eq!(
+        gate(PhaseStatus::Ready, Some(HookState::Blocked)),
+        PhaseStatus::Working
+    );
+    assert_eq!(
+        gate(PhaseStatus::Ready, Some(HookState::Waiting)),
+        PhaseStatus::Ready
+    );
+    assert_eq!(
+        gate(PhaseStatus::Ready, Some(HookState::Ended)),
+        PhaseStatus::Ready
+    );
     assert_eq!(
         gate(PhaseStatus::Ready, None),
         PhaseStatus::Ready,
         "no trustworthy record — no hooks, or a stale one — falls back to the artifact"
     );
-    assert_eq!(gate(PhaseStatus::Working, Some(HookState::Waiting)), PhaseStatus::Working);
+    assert_eq!(
+        gate(PhaseStatus::Working, Some(HookState::Waiting)),
+        PhaseStatus::Working
+    );
 }
 
 /// The refresh snapshots tasks before it runs, so a pass in flight across a
@@ -17426,6 +17805,7 @@ fn a_refresh_verdict_for_a_status_the_task_has_left_is_dropped() {
         worktree_path: None,
         session_name: None,
         agent: "claude".into(),
+        base_agent: "claude".into(),
         was_ready: true,
         hook_status: None,
         awaiting_trust: None,
@@ -17447,11 +17827,17 @@ fn a_refresh_verdict_for_a_status_the_task_has_left_is_dropped() {
     });
 
     assert!(
-        !matches!(app.state.phase_status_cache.get(&moved_on.id), Some((PhaseStatus::Ready, _))),
+        !matches!(
+            app.state.phase_status_cache.get(&moved_on.id),
+            Some((PhaseStatus::Ready, _))
+        ),
         "a Running verdict must not reach a task now in Review"
     );
     assert!(
-        matches!(app.state.phase_status_cache.get(&still_there.id), Some((PhaseStatus::Ready, _))),
+        matches!(
+            app.state.phase_status_cache.get(&still_there.id),
+            Some((PhaseStatus::Ready, _))
+        ),
         "a verdict for the task's current status still applies"
     );
 }

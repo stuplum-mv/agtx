@@ -1,6 +1,6 @@
 use agtx::db::{
-    Database, Notification, NotificationKind, PhaseStatus, Project, Task, TaskRuntime, TaskStatus,
-    TransitionRequest,
+    Database, Notification, NotificationKind, PhaseStatus, Project, SessionAgent, Task,
+    TaskRuntime, TaskStatus, TransitionRequest,
 };
 
 // === TaskStatus Tests ===
@@ -170,12 +170,33 @@ fn test_in_memory_project_db_update_task() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
+fn a_session_keeps_the_agent_definition_it_was_launched_with() {
+    let db = Database::open_in_memory_project().unwrap();
+    let mut task = Task::new("Profiled session", "omp-review", "proj-1");
+    task.session_name = Some("session-1".to_string());
+    task.session_agent = Some(SessionAgent {
+        base_agent: "omp".to_string(),
+        profile: Some("review".to_string()),
+        model: Some("cursor/gpt-5.6".to_string()),
+    });
+    db.create_task(&task).unwrap();
+
+    let retrieved = db.get_task(&task.id).unwrap().unwrap();
+    assert_eq!(retrieved.session_agent, task.session_agent);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
 fn a_phase_switch_does_not_overwrite_the_task_pick() {
     let db = Database::open_in_memory_project().unwrap();
     let mut task = Task::new("Picked gemini", "gemini", "proj-1");
     db.create_task(&task).unwrap();
     assert_eq!(
-        db.get_task(&task.id).unwrap().unwrap().base_agent.as_deref(),
+        db.get_task(&task.id)
+            .unwrap()
+            .unwrap()
+            .base_agent
+            .as_deref(),
         Some("gemini")
     );
 
@@ -928,7 +949,8 @@ fn notification_kind_spellings_match_serde() {
 #[cfg(feature = "test-mocks")]
 fn a_status_change_stamps_phase_entered_at_and_other_edits_do_not() {
     use agtx::db::{Database, Task, TaskStatus};
-    let entered = |db: &Database, id: &str| db.get_task(id).unwrap().unwrap().phase_entered_at.unwrap();
+    let entered =
+        |db: &Database, id: &str| db.get_task(id).unwrap().unwrap().phase_entered_at.unwrap();
     let pause = || std::thread::sleep(std::time::Duration::from_millis(15));
 
     let db = Database::open_in_memory_project().unwrap();
@@ -939,7 +961,11 @@ fn a_status_change_stamps_phase_entered_at_and_other_edits_do_not() {
     pause();
     task.title = "renamed".into();
     db.update_task(&task).unwrap();
-    assert_eq!(entered(&db, &task.id), created, "an edit that keeps the status is not a new phase");
+    assert_eq!(
+        entered(&db, &task.id),
+        created,
+        "an edit that keeps the status is not a new phase"
+    );
 
     pause();
     task.status = TaskStatus::Planning;
@@ -953,7 +979,10 @@ fn a_status_change_stamps_phase_entered_at_and_other_edits_do_not() {
     pause();
     task.status = TaskStatus::Running; // resume
     db.update_task(&task).unwrap();
-    assert!(entered(&db, &task.id) > review, "a backward move is a new phase too");
+    assert!(
+        entered(&db, &task.id) > review,
+        "a backward move is a new phase too"
+    );
 }
 
 /// A published verdict remembers the status it was computed for, so a reader

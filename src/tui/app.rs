@@ -22,14 +22,13 @@ use crate::core::input::{
     composer_holds, delivery_needle, pane_shows, submit_message, COMPOSER_TAIL_LINES,
     SUBMIT_ATTEMPTS, SUBMIT_CONFIRM_POLLS,
 };
-use crate::db::{Database, PhaseStatus, Task, TaskStatus, TransitionRequest};
+use crate::db::{Database, PhaseStatus, SessionAgent, Task, TaskStatus, TransitionRequest};
 use crate::git::{
     self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps,
 };
 use crate::skills;
 use crate::tmux::{
-    self, pane_tail, InputConfig, InputError, PaneInput, PaneInputSink, RealTmuxOps,
-    TmuxOperations,
+    self, pane_tail, InputConfig, InputError, PaneInput, PaneInputSink, RealTmuxOps, TmuxOperations,
 };
 use crate::AppMode;
 
@@ -544,6 +543,7 @@ struct SetupResult {
     branch_name: String,
     new_status: Option<TaskStatus>,
     agent: String,
+    session_agent: SessionAgent,
     plugin: Option<String>,
     error: Option<String>,
 }
@@ -582,6 +582,7 @@ struct SessionTaskStatus {
     session_name: Option<String>,
     /// Agent name (needed for merge-conflict skill dispatch).
     agent: String,
+    base_agent: String,
     /// Whether this task was already Ready before this refresh cycle.
     was_ready: bool,
     /// The agent's own report of its state, when it writes one.
@@ -791,13 +792,78 @@ pub struct App {
 /// Add configured instances whose base agent is actually available. The cloned
 /// base retains its command metadata while the instance carries profile/model
 /// selection into the registry operations.
+fn session_agent_for_instance(config: &MergedConfig, instance_name: &str) -> SessionAgent {
+    match config.agent_profiles.get(instance_name) {
+        Some(profile) => SessionAgent {
+            base_agent: profile.agent.clone(),
+            profile: profile.profile.clone(),
+            model: profile.model.clone(),
+        },
+        None => SessionAgent {
+            base_agent: config.base_agent_name(instance_name).to_string(),
+            profile: None,
+            model: None,
+        },
+    }
+}
+
+fn session_agent_for_target(
+    config: &MergedConfig,
+    task: &Task,
+    instance_name: &str,
+) -> SessionAgent {
+    if task.agent == instance_name {
+        task.session_agent
+            .clone()
+            .unwrap_or_else(|| session_agent_for_instance(config, instance_name))
+    } else {
+        session_agent_for_instance(config, instance_name)
+    }
+}
+
+fn current_session_base_agent(task: &Task, config: &MergedConfig) -> String {
+    task.session_agent
+        .as_ref()
+        .map(|snapshot| snapshot.base_agent.clone())
+        .unwrap_or_else(|| config.base_agent_name(&task.agent).to_string())
+}
+
+fn operations_for_session_agent(
+    instance_name: &str,
+    snapshot: &SessionAgent,
+    registry: &dyn agent::AgentRegistry,
+) -> Arc<dyn AgentOperations> {
+    agent::get_agent(&snapshot.base_agent)
+        .map(|base| {
+            Arc::new(agent::CodingAgent::new(agent::Agent::named(
+                instance_name,
+                &base,
+                snapshot.profile.clone(),
+                snapshot.model.clone(),
+            ))) as Arc<dyn AgentOperations>
+        })
+        .unwrap_or_else(|| registry.get(instance_name))
+}
+
+fn operations_for_task_session(
+    task: &Task,
+    registry: &dyn agent::AgentRegistry,
+) -> Arc<dyn AgentOperations> {
+    task.session_agent
+        .as_ref()
+        .map(|snapshot| operations_for_session_agent(&task.agent, snapshot, registry))
+        .unwrap_or_else(|| registry.get(&task.agent))
+}
+
 fn configured_available_agents(
     mut available: Vec<agent::Agent>,
     config: &MergedConfig,
 ) -> Vec<agent::Agent> {
     for (instance_name, profile) in &config.agent_profiles {
         if agent::get_agent(instance_name).is_some()
-            || available.iter().any(|candidate| candidate.name == *instance_name)
+            || available
+                .iter()
+                .any(|candidate| candidate.name == *instance_name)
         {
             continue;
         }
@@ -1067,7 +1133,11 @@ impl App {
                 .filter(|t| t.status != TaskStatus::Done)
                 .filter_map(|t| {
                     t.worktree_path.clone().map(|wt| {
-                        (wt, t.plugin.clone(), collect_phase_agents(&app.state.config, t))
+                        (
+                            wt,
+                            t.plugin.clone(),
+                            collect_phase_agents(&app.state.config, t),
+                        )
                     })
                 })
                 .collect();
@@ -1102,7 +1172,8 @@ impl App {
                 .collect();
 
             for task in &tasks_to_recover {
-                let agent_ops = app.state.agent_registry.get(&task.agent);
+                let agent_ops =
+                    operations_for_task_session(task, app.state.agent_registry.as_ref());
                 let _ = recover_task_session(
                     task,
                     &app.state.tmux_project_name,
@@ -1515,6 +1586,7 @@ impl App {
                             task.worktree_path = Some(result.worktree_path);
                             task.branch_name = Some(result.branch_name);
                             task.agent = result.agent;
+                            task.session_agent = Some(result.session_agent);
                             task.plugin = result.plugin;
                             if let Some(status) = result.new_status {
                                 task.status = status;
@@ -1926,7 +1998,7 @@ impl App {
                 Self::draw_task_card(
                     frame,
                     task,
-                    state.config.base_agent_name(&task.agent),
+                    current_session_base_agent(task, &state.config).as_str(),
                     card_area,
                     is_selected,
                     &state.config.theme,
@@ -3998,20 +4070,7 @@ impl App {
         ));
     }
 
-    fn install_config_for_current_project(&mut self, mut config: MergedConfig) {
-        // A live pane was launched from the old profile definition. Keep that
-        // definition until the pane exits so a config reload cannot reinterpret
-        // its process, exit command, or resume flags as a different base agent.
-        for task in &self.state.board.tasks {
-            if task.session_name.is_none() {
-                continue;
-            }
-            if let Some(profile) = self.state.config.agent_profiles.get(&task.agent) {
-                config
-                    .agent_profiles
-                    .insert(task.agent.clone(), profile.clone());
-            }
-        }
+    fn install_config_for_current_project(&mut self, config: MergedConfig) {
         self.state.config = config;
         self.refresh_agent_configuration();
     }
@@ -4020,10 +4079,8 @@ impl App {
         if self.state.agent_registry_injected {
             return;
         }
-        self.state.available_agents = configured_available_agents(
-            agent::detect_available_agents(),
-            &self.state.config,
-        );
+        self.state.available_agents =
+            configured_available_agents(agent::detect_available_agents(), &self.state.config);
         self.state.agent_registry = Arc::new(agent::RealAgentRegistry::with_profiles(
             &self.state.config.default_agent,
             &self.state.config.agent_profiles,
@@ -4163,10 +4220,11 @@ impl App {
                 let session_name = task.session_name.clone();
                 let worktree_path = task.worktree_path.clone();
                 let branch_name = task.branch_name.clone();
-                let agent = self.state.config.base_agent_name(&task.agent).to_string();
+                let agent = current_session_base_agent(&task, &self.state.config);
 
                 // Update task status immediately
                 task.session_name = None;
+                task.session_agent = None;
                 task.worktree_path = None;
                 task.status = TaskStatus::Done;
                 task.updated_at = chrono::Utc::now();
@@ -5896,7 +5954,7 @@ impl App {
                 let tmux_ops = Arc::clone(&self.state.tmux_ops);
                 let git_ops = Arc::clone(&self.state.git_ops);
                 let project_path = project_path.clone();
-                let base_agent = self.state.config.base_agent_name(&task.agent).to_string();
+                let base_agent = current_session_base_agent(&task, &self.state.config);
                 std::thread::spawn(move || {
                     delete_task_resources(
                         &task,
@@ -6035,7 +6093,13 @@ impl App {
         let Some(ref wt_path) = task.worktree_path else {
             return false;
         };
-        if phase_artifact_fresh(wt_path, current_status, &plugin, task.cycle, task.phase_entered_at) {
+        if phase_artifact_fresh(
+            wt_path,
+            current_status,
+            &plugin,
+            task.cycle,
+            task.phase_entered_at,
+        ) {
             return false;
         }
         let agent_running = task.session_name.as_ref().map_or(false, |target| {
@@ -6043,7 +6107,7 @@ impl App {
                 && is_agent_active(
                     &*self.state.tmux_ops,
                     target,
-                    Some(self.state.config.base_agent_name(&task.agent)),
+                    Some(current_session_base_agent(task, &self.state.config).as_str()),
                 )
         });
         if agent_running {
@@ -6091,12 +6155,10 @@ impl App {
             }
         }
 
-        let current_base_agent = self.state.config.base_agent_name(&task.agent).to_string();
-        let planning_base_agent = self
-            .state
-            .config
-            .base_agent_name(&planning_agent)
-            .to_string();
+        let current_base_agent = current_session_base_agent(task, &self.state.config);
+        let planning_session_agent =
+            session_agent_for_target(&self.state.config, task, &planning_agent);
+        let planning_base_agent = planning_session_agent.base_agent.clone();
 
         let has_live_session = task_has_live_session(&task, self.state.tmux_ops.as_ref());
         if has_live_session {
@@ -6135,15 +6197,23 @@ impl App {
             let auto_dismiss = plugin
                 .as_ref()
                 .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+            deploy_agent_switch(
+                task,
+                project_path,
+                &plugin,
+                &planning_base_agent,
+                agent_switch,
+                self.state.config.agent_hooks,
+            )?;
             spawn_send_to_agent(
                 Arc::clone(&self.state.tmux_ops),
                 Arc::clone(&self.state.agent_registry),
                 task.id.clone(),
-                self.state.config.agent_hooks,
                 self.state.config.auto_trust,
                 target,
                 current_base_agent,
                 planning_agent.clone(),
+                planning_session_agent.clone(),
                 planning_base_agent.clone(),
                 agent_switch,
                 task.cycle > 0,
@@ -6154,9 +6224,9 @@ impl App {
                 task_content,
                 auto_dismiss,
                 task.worktree_path.clone(),
-                project_path.to_path_buf(),
                 plugin,
             );
+            task.session_agent = Some(planning_session_agent.clone());
             task.agent = planning_agent;
             return Ok(false);
         }
@@ -6286,6 +6356,7 @@ impl App {
                         branch_name: tmp_task.branch_name.unwrap_or_default(),
                         new_status: Some(TaskStatus::Planning),
                         agent: planning_agent_clone.clone(),
+                        session_agent: planning_session_agent.clone(),
                         plugin: plugin_name,
                         error: None,
                     });
@@ -6320,6 +6391,7 @@ impl App {
                         branch_name: String::new(),
                         new_status: None,
                         agent: planning_agent_clone,
+                        session_agent: planning_session_agent,
                         plugin: plugin_name,
                         error: Some(format!("Planning setup failed: {}", e)),
                     });
@@ -6333,8 +6405,7 @@ impl App {
     /// Planning → Running: send execution skill/prompt to agent.
     /// Always returns Ok(false) to continue with db update.
     fn transition_to_running(&mut self, task: &mut Task) -> Result<bool> {
-        let (running_agent, agent_switch) =
-            needs_agent_switch(&self.state.config, task, "running");
+        let (running_agent, agent_switch) = needs_agent_switch(&self.state.config, task, "running");
         let plugin = match self.load_transition_plugin(task, &running_agent) {
             Ok(plugin) => plugin,
             Err(error) => {
@@ -6343,12 +6414,10 @@ impl App {
             }
         };
         if let Some(session_name) = &task.session_name {
-            let current_base_agent = self.state.config.base_agent_name(&task.agent).to_string();
-            let running_base_agent = self
-                .state
-                .config
-                .base_agent_name(&running_agent)
-                .to_string();
+            let current_base_agent = current_session_base_agent(task, &self.state.config);
+            let running_session_agent =
+                session_agent_for_target(&self.state.config, task, &running_agent);
+            let running_base_agent = running_session_agent.base_agent.clone();
             let task_content = task.content_text();
             let run_phase = determine_phase_variant(
                 "running",
@@ -6381,15 +6450,26 @@ impl App {
             let auto_dismiss = plugin
                 .as_ref()
                 .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+            deploy_agent_switch(
+                task,
+                self.state
+                    .project_path
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("running transition requires a project"))?,
+                &plugin,
+                &running_base_agent,
+                agent_switch,
+                self.state.config.agent_hooks,
+            )?;
             spawn_send_to_agent(
                 Arc::clone(&self.state.tmux_ops),
                 Arc::clone(&self.state.agent_registry),
                 task.id.clone(),
-                self.state.config.agent_hooks,
                 self.state.config.auto_trust,
                 session_name.clone(),
                 current_base_agent,
                 running_agent.clone(),
+                running_session_agent.clone(),
                 running_base_agent,
                 agent_switch,
                 task.cycle > 0,
@@ -6400,9 +6480,9 @@ impl App {
                 task_content,
                 auto_dismiss,
                 task.worktree_path.clone(),
-                self.state.project_path.clone().unwrap_or_default(),
                 plugin,
             );
+            task.session_agent = Some(running_session_agent);
             task.agent = running_agent;
         }
         Ok(false)
@@ -6412,12 +6492,10 @@ impl App {
     /// Returns Ok(true) always (PR push or review confirm popup shown).
     fn transition_to_review(&mut self, task: &mut Task, project_path: &Path) -> Result<bool> {
         let (review_agent, agent_switch) = needs_agent_switch(&self.state.config, task, "review");
-        let current_base_agent = self.state.config.base_agent_name(&task.agent).to_string();
-        let review_base_agent = self
-            .state
-            .config
-            .base_agent_name(&review_agent)
-            .to_string();
+        let current_base_agent = current_session_base_agent(task, &self.state.config);
+        let review_session_agent =
+            session_agent_for_target(&self.state.config, task, &review_agent);
+        let review_base_agent = review_session_agent.base_agent.clone();
         let plugin = match self.load_transition_plugin(task, &review_agent) {
             Ok(plugin) => plugin,
             Err(error) => {
@@ -6451,15 +6529,23 @@ impl App {
             let auto_dismiss = plugin
                 .as_ref()
                 .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+            deploy_agent_switch(
+                task,
+                project_path,
+                &plugin,
+                &review_base_agent,
+                agent_switch,
+                self.state.config.agent_hooks,
+            )?;
             spawn_send_to_agent(
                 Arc::clone(&self.state.tmux_ops),
                 Arc::clone(&self.state.agent_registry),
                 task.id.clone(),
-                self.state.config.agent_hooks,
                 self.state.config.auto_trust,
                 session_name.clone(),
                 current_base_agent,
                 review_agent.clone(),
+                review_session_agent.clone(),
                 review_base_agent,
                 agent_switch,
                 task.cycle > 0,
@@ -6470,10 +6556,10 @@ impl App {
                 task_content,
                 auto_dismiss,
                 task.worktree_path.clone(),
-                project_path.to_path_buf(),
                 plugin,
             );
         }
+        task.session_agent = Some(review_session_agent);
         task.agent = review_agent.clone();
 
         // PR already exists (task was resumed from Review) — push new changes
@@ -6487,7 +6573,7 @@ impl App {
             let task_clone = task.clone();
             let project_path_clone = project_path.to_path_buf();
             let git_ops = Arc::clone(&self.state.git_ops);
-            let agent_ops = self.state.agent_registry.get(&review_agent);
+            let agent_ops = operations_for_task_session(task, self.state.agent_registry.as_ref());
 
             let (tx, rx) = mpsc::channel();
             self.state.pr_creation_rx = Some(rx);
@@ -6562,8 +6648,9 @@ impl App {
         let session_name = task.session_name.clone();
         let worktree_path = task.worktree_path.clone();
         let branch_name = task.branch_name.clone();
-        let agent = self.state.config.base_agent_name(&task.agent).to_string();
+        let agent = current_session_base_agent(task, &self.state.config);
         task.session_name = None;
+        task.session_agent = None;
         task.worktree_path = None;
 
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
@@ -6626,6 +6713,7 @@ impl App {
         let plugin_name = task.plugin.clone();
         let agent_name = phase_agent(&self.state.config, &task, "research").to_string();
         let base_agent_name = self.state.config.base_agent_name(&agent_name).to_string();
+        let research_session_agent = session_agent_for_instance(&self.state.config, &agent_name);
         let plugin = match self.load_transition_plugin(&task, &agent_name) {
             Ok(plugin) => plugin,
             Err(error) => {
@@ -6762,6 +6850,7 @@ impl App {
                         branch_name: tmp_task.branch_name.unwrap_or_default(),
                         new_status: None, // stays in Backlog
                         agent: agent_name.clone(),
+                        session_agent: research_session_agent.clone(),
                         plugin: plugin_name,
                         error: None,
                     });
@@ -6795,6 +6884,7 @@ impl App {
                         branch_name: String::new(),
                         new_status: None,
                         agent: agent_name,
+                        session_agent: research_session_agent,
                         plugin: plugin_name,
                         error: Some(format!("Research setup failed: {}", e)),
                     });
@@ -7438,11 +7528,9 @@ impl App {
 
         let plugin_name = task.plugin.clone();
         let plugin = plugin_check;
-        let running_base_agent = self
-            .state
-            .config
-            .base_agent_name(&running_agent)
-            .to_string();
+        let running_session_agent =
+            session_agent_for_target(&self.state.config, &task, &running_agent);
+        let running_base_agent = running_session_agent.base_agent.clone();
         let all_agents = collect_phase_agents(&self.state.config, &task);
         let prompt = resolve_prompt(&plugin, "running", &task_content, &task.id, task.cycle);
         let skill_cmd = resolve_skill_command(
@@ -7479,19 +7567,24 @@ impl App {
             let target = task.session_name.clone().unwrap();
             let (agent_switch_agent, agent_switch) =
                 needs_agent_switch(&self.state.config, &task, "running");
+            deploy_agent_switch(
+                &task,
+                &project_path,
+                &plugin,
+                &running_base_agent,
+                agent_switch,
+                self.state.config.agent_hooks,
+            )?;
             spawn_send_to_agent(
                 Arc::clone(&self.state.tmux_ops),
                 Arc::clone(&self.state.agent_registry),
                 task.id.clone(),
-                self.state.config.agent_hooks,
                 self.state.config.auto_trust,
                 target,
-                self.state.config.base_agent_name(&task.agent).to_string(),
+                current_session_base_agent(&task, &self.state.config),
                 agent_switch_agent.clone(),
-                self.state
-                    .config
-                    .base_agent_name(&agent_switch_agent)
-                    .to_string(),
+                running_session_agent.clone(),
+                running_base_agent.clone(),
                 agent_switch,
                 task.cycle > 0,
                 skill_cmd,
@@ -7501,9 +7594,9 @@ impl App {
                 task_content,
                 auto_dismiss,
                 task.worktree_path.clone(),
-                project_path.clone(),
                 plugin,
             );
+            task.session_agent = Some(running_session_agent.clone());
             task.agent = agent_switch_agent;
             task.status = TaskStatus::Running;
             task.updated_at = chrono::Utc::now();
@@ -7581,6 +7674,7 @@ impl App {
                         branch_name: tmp_task.branch_name.unwrap_or_default(),
                         new_status: Some(TaskStatus::Running),
                         agent: running_agent_clone.clone(),
+                        session_agent: running_session_agent.clone(),
                         plugin: plugin_name,
                         error: None,
                     });
@@ -7616,6 +7710,7 @@ impl App {
                         branch_name: String::new(),
                         new_status: None,
                         agent: running_agent_clone,
+                        session_agent: running_session_agent,
                         plugin: plugin_name,
                         error: Some(format!("Running setup failed: {}", e)),
                     });
@@ -7629,7 +7724,7 @@ impl App {
     /// Move task from Review back to Running (only allowed transition backwards)
     /// The tmux window should still be open from when it was in Running state
     fn move_review_to_running(&mut self, task_id: &str) -> Result<()> {
-        if let (Some(db), Some(_project_path)) = (&self.state.db, &self.state.project_path) {
+        if let (Some(db), Some(project_path)) = (&self.state.db, &self.state.project_path) {
             if let Some(mut task) = db.get_task(task_id)? {
                 if task.status != TaskStatus::Review {
                     return Ok(());
@@ -7637,16 +7732,28 @@ impl App {
 
                 let (running_agent, agent_switch) =
                     needs_agent_switch(&self.state.config, &task, "running");
-                if let Err(error) = self.load_transition_plugin(&task, &running_agent) {
-                    self.show_transition_error(&error);
-                    return Ok(());
-                }
+                let plugin = match self.load_transition_plugin(&task, &running_agent) {
+                    Ok(plugin) => plugin,
+                    Err(error) => {
+                        self.show_transition_error(&error);
+                        return Ok(());
+                    }
+                };
+                let running_session_agent =
+                    session_agent_for_target(&self.state.config, &task, &running_agent);
+                deploy_agent_switch(
+                    &task,
+                    project_path,
+                    &plugin,
+                    &running_session_agent.base_agent,
+                    agent_switch,
+                    self.state.config.agent_hooks,
+                )?;
 
                 mark_reviewed_point(&task);
 
                 // Switch agent if running phase uses a different agent than review
-                let current_base_agent =
-                    self.state.config.base_agent_name(&task.agent).to_string();
+                let current_base_agent = current_session_base_agent(&task, &self.state.config);
                 if agent_switch {
                     if let Some(session_name) = &task.session_name {
                         let session_clone = session_name.clone();
@@ -7676,6 +7783,8 @@ impl App {
                     }
                 }
 
+                task.session_agent = Some(running_session_agent);
+
                 task.agent = running_agent;
                 task.status = TaskStatus::Running;
                 task.updated_at = chrono::Utc::now();
@@ -7687,7 +7796,7 @@ impl App {
     }
 
     fn move_review_to_planning(&mut self, task_id: &str) -> Result<()> {
-        if let (Some(db), Some(_project_path)) = (&self.state.db, &self.state.project_path) {
+        if let (Some(db), Some(project_path)) = (&self.state.db, &self.state.project_path) {
             if let Some(mut task) = db.get_task(task_id)? {
                 if task.status != TaskStatus::Review {
                     return Ok(());
@@ -7704,15 +7813,21 @@ impl App {
                     }
                 };
 
+                let planning_session_agent =
+                    session_agent_for_target(&self.state.config, &task, &planning_agent);
+                let planning_base_agent = planning_session_agent.base_agent.clone();
+                deploy_agent_switch(
+                    &task,
+                    project_path,
+                    &plugin,
+                    &planning_base_agent,
+                    agent_switch,
+                    self.state.config.agent_hooks,
+                )?;
+
                 // Increment cycle counter for the next phase
                 task.cycle += 1;
-                let current_base_agent =
-                    self.state.config.base_agent_name(&task.agent).to_string();
-                let planning_base_agent = self
-                    .state
-                    .config
-                    .base_agent_name(&planning_agent)
-                    .to_string();
+                let current_base_agent = current_session_base_agent(&task, &self.state.config);
 
                 // Resolve skill command and prompt for the new planning phase
                 let task_content = task
@@ -7786,6 +7901,8 @@ impl App {
                     });
                 }
 
+                task.session_agent = Some(planning_session_agent);
+
                 task.agent = planning_agent;
                 task.status = TaskStatus::Planning;
                 task.updated_at = chrono::Utc::now();
@@ -7797,7 +7914,7 @@ impl App {
     }
 
     fn move_running_to_planning(&mut self, task_id: &str) -> Result<()> {
-        if let (Some(db), Some(_project_path)) = (&self.state.db, &self.state.project_path) {
+        if let (Some(db), Some(project_path)) = (&self.state.db, &self.state.project_path) {
             if let Some(mut task) = db.get_task(task_id)? {
                 if task.status != TaskStatus::Running {
                     return Ok(());
@@ -7806,12 +7923,24 @@ impl App {
                 // Switch agent if planning phase uses a different agent than running
                 let (planning_agent, agent_switch) =
                     needs_agent_switch(&self.state.config, &task, "planning");
-                if let Err(error) = self.load_transition_plugin(&task, &planning_agent) {
-                    self.show_transition_error(&error);
-                    return Ok(());
-                }
-                let current_base_agent =
-                    self.state.config.base_agent_name(&task.agent).to_string();
+                let plugin = match self.load_transition_plugin(&task, &planning_agent) {
+                    Ok(plugin) => plugin,
+                    Err(error) => {
+                        self.show_transition_error(&error);
+                        return Ok(());
+                    }
+                };
+                let planning_session_agent =
+                    session_agent_for_target(&self.state.config, &task, &planning_agent);
+                deploy_agent_switch(
+                    &task,
+                    project_path,
+                    &plugin,
+                    &planning_session_agent.base_agent,
+                    agent_switch,
+                    self.state.config.agent_hooks,
+                )?;
+                let current_base_agent = current_session_base_agent(&task, &self.state.config);
                 if agent_switch {
                     if let Some(session_name) = &task.session_name {
                         let session_clone = session_name.clone();
@@ -7841,6 +7970,8 @@ impl App {
                     }
                 }
 
+                task.session_agent = Some(planning_session_agent);
+
                 task.agent = planning_agent;
                 task.status = TaskStatus::Planning;
                 task.updated_at = chrono::Utc::now();
@@ -7865,7 +7996,10 @@ impl App {
         if let Some(db) = self.state.db.as_ref() {
             match db.reclaim_stale_transition_requests(&instance_id, RECLAIM_CLAIMS_AFTER) {
                 Ok(n) if n > 0 => {
-                    tracing::info!(count = n, "Reclaimed transition requests from a dead instance")
+                    tracing::info!(
+                        count = n,
+                        "Reclaimed transition requests from a dead instance"
+                    )
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "Failed to reclaim transition requests"),
@@ -7915,10 +8049,7 @@ impl App {
         Ok(())
     }
 
-    fn execute_transition_request(
-        &mut self,
-        req: &TransitionRequest,
-    ) -> Result<TransitionOutcome> {
+    fn execute_transition_request(&mut self, req: &TransitionRequest) -> Result<TransitionOutcome> {
         tracing::info!(
             task_id = %req.task_id,
             action = %req.action,
@@ -8227,7 +8358,7 @@ impl App {
 
         if let Some(session) = task.session_name.clone() {
             if self.state.tmux_ops.window_exists(&session).unwrap_or(false) {
-                let base_agent = self.state.config.base_agent_name(&task.agent).to_string();
+                let base_agent = current_session_base_agent(task, &self.state.config);
                 let skill_cmd =
                     skills::transform_plugin_command("/agtx:merge-conflicts", &base_agent);
                 let prompt = format!(
@@ -8257,12 +8388,10 @@ impl App {
     /// MCP version of transition_to_review: sends review prompt but skips PR popup.
     fn mcp_transition_to_review(&mut self, task: &mut Task) -> Result<()> {
         let (review_agent, agent_switch) = needs_agent_switch(&self.state.config, task, "review");
-        let current_base_agent = self.state.config.base_agent_name(&task.agent).to_string();
-        let review_base_agent = self
-            .state
-            .config
-            .base_agent_name(&review_agent)
-            .to_string();
+        let current_base_agent = current_session_base_agent(task, &self.state.config);
+        let review_session_agent =
+            session_agent_for_target(&self.state.config, task, &review_agent);
+        let review_base_agent = review_session_agent.base_agent.clone();
         if let Some(session_name) = &task.session_name {
             let plugin = self.load_transition_plugin(task, &review_agent)?;
             let task_content = task.content_text();
@@ -8290,15 +8419,26 @@ impl App {
             let auto_dismiss = plugin
                 .as_ref()
                 .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+            deploy_agent_switch(
+                task,
+                self.state
+                    .project_path
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("review transition requires a project"))?,
+                &plugin,
+                &review_base_agent,
+                agent_switch,
+                self.state.config.agent_hooks,
+            )?;
             spawn_send_to_agent(
                 Arc::clone(&self.state.tmux_ops),
                 Arc::clone(&self.state.agent_registry),
                 task.id.clone(),
-                self.state.config.agent_hooks,
                 self.state.config.auto_trust,
                 session_name.clone(),
                 current_base_agent,
                 review_agent.clone(),
+                review_session_agent.clone(),
                 review_base_agent,
                 agent_switch,
                 task.cycle > 0,
@@ -8309,10 +8449,10 @@ impl App {
                 task_content,
                 auto_dismiss,
                 task.worktree_path.clone(),
-                self.state.project_path.clone().unwrap_or_default(),
                 plugin,
             );
         }
+        task.session_agent = Some(review_session_agent);
         task.agent = review_agent;
         task.status = TaskStatus::Review;
         task.updated_at = chrono::Utc::now();
@@ -8414,7 +8554,11 @@ impl App {
 
         // Spawn new orchestrator
         let default_agent = self.state.config.default_agent.clone();
-        let base_agent = self.state.config.base_agent_name(&default_agent).to_string();
+        let base_agent = self
+            .state
+            .config
+            .base_agent_name(&default_agent)
+            .to_string();
         let agent = self.state.agent_registry.get(&default_agent);
         let project_path_str = project_path.to_string_lossy().to_string();
 
@@ -8435,10 +8579,17 @@ impl App {
         // double-escape and break the command.
         let mcp_json_str = mcp_json.to_string().replace('\'', "'\"'\"'");
 
+        ensure_deployment_paths_safe(&project_path, &[&base_agent])?;
         if let Some(spec) = agent::spec(&base_agent).filter(|spec| spec.name == "omp") {
             exclude_agtx_files_from_git(&project_path);
             write_mcp_config(spec, &project_path_str, &project_path_str, &agtx_bin);
         }
+        deploy_skill(
+            &project_path,
+            "agtx-orchestrate",
+            skills::ORCHESTRATE_SKILL,
+            &base_agent,
+        );
         let agent_cmd = agent.build_orchestrator_command(&mcp_json_str, &agtx_bin);
 
         // Ensure project tmux session exists
@@ -8485,14 +8636,6 @@ impl App {
         let _ = self.state.input_sink.flush();
         self.state.shell_popup = Some(popup);
 
-        // Deploy orchestrate skill to project root so the agent can discover it
-        deploy_skill(
-            &project_path,
-            "agtx-orchestrate",
-            skills::ORCHESTRATE_SKILL,
-            &base_agent,
-        );
-
         if let Some(ref db) = self.state.db {
             run_orchestrator_catchup(
                 db,
@@ -8530,7 +8673,8 @@ impl App {
                     .window_exists(window_name)
                     .unwrap_or(true)
                 {
-                    let agent_ops = self.state.agent_registry.get(&task.agent);
+                    let agent_ops =
+                        operations_for_task_session(task, self.state.agent_registry.as_ref());
                     let project_path = self.state.project_path.as_deref().unwrap_or(Path::new("."));
                     let _ = recover_task_session(
                         task,
@@ -8609,24 +8753,10 @@ impl App {
     /// Load the plugin that a specific task was created with.
     /// Falls back to bundled agtx plugin for tasks with no explicit plugin.
     fn load_task_plugin(&self, task: &Task) -> Option<WorkflowPlugin> {
-        let instance = if task.agent.is_empty() {
-            &self.state.config.default_agent
-        } else {
-            &task.agent
-        };
-        self.load_task_plugin_for_agent(task, instance)
-    }
-
-    /// Load a task plugin for the agent that will receive its next command.
-    fn load_task_plugin_for_agent(
-        &self,
-        task: &Task,
-        instance_name: &str,
-    ) -> Option<WorkflowPlugin> {
         load_task_plugin(
             task,
             self.state.project_path.as_deref(),
-            self.state.config.base_agent_name(instance_name),
+            &current_session_base_agent(task, &self.state.config),
         )
     }
 
@@ -8636,11 +8766,8 @@ impl App {
         task: &Task,
         instance_name: &str,
     ) -> Result<Option<WorkflowPlugin>> {
-        load_task_plugin_checked(
-            task,
-            self.state.project_path.as_deref(),
-            self.state.config.base_agent_name(instance_name),
-        )
+        let target = session_agent_for_target(&self.state.config, task, instance_name);
+        load_task_plugin_checked(task, self.state.project_path.as_deref(), &target.base_agent)
     }
 
     fn show_transition_error(&mut self, error: &anyhow::Error) {
@@ -8649,7 +8776,15 @@ impl App {
 
     pub fn refresh_tasks(&mut self) -> Result<()> {
         if let Some(db) = &self.state.db {
-            self.state.board.tasks = db.get_all_tasks()?;
+            let mut tasks = db.get_all_tasks()?;
+            for task in &mut tasks {
+                if task.session_name.is_some() && task.session_agent.is_none() {
+                    task.session_agent =
+                        Some(session_agent_for_instance(&self.state.config, &task.agent));
+                    db.update_task(task)?;
+                }
+            }
+            self.state.board.tasks = tasks;
             // Refresh dependency satisfaction cache for backlog tasks with references
             self.state.deps_satisfied_cache.clear();
             for task in &self.state.board.tasks {
@@ -8815,7 +8950,7 @@ impl App {
                     t.cycle,
                     was_ready,
                     t.agent.clone(),
-                    self.state.config.base_agent_name(&t.agent).to_string(),
+                    current_session_base_agent(t, &self.state.config),
                     t.phase_entered_at,
                 )
             })
@@ -9003,8 +9138,9 @@ impl App {
                             // `Blocked`, so the user knows a decision is theirs to
                             // make rather than watching a task sit at "working".
                             if !auto_trust {
-                                awaiting_trust = visible_security_dialog(Some(&base_agent), content)
-                                    .map(str::to_string);
+                                awaiting_trust =
+                                    visible_security_dialog(Some(&base_agent), content)
+                                        .map(str::to_string);
                             }
                             // A fresh state each poll: the attempt cap guards a
                             // single startup burst, whereas here the 2s cadence
@@ -9057,6 +9193,7 @@ impl App {
                     worktree_path,
                     session_name,
                     agent,
+                    base_agent,
                     was_ready,
                 });
             }
@@ -9324,12 +9461,7 @@ impl App {
                             let tmux_ops = Arc::clone(&self.state.tmux_ops);
                             let wt = wt.clone();
                             let sn = sn.clone();
-                            let agent_name = task_status.agent.clone();
-                            let base_agent_name = self
-                                .state
-                                .config
-                                .base_agent_name(&agent_name)
-                                .to_string();
+                            let base_agent_name = task_status.base_agent.clone();
 
                             std::thread::spawn(move || {
                                 match git_ops.fetch_and_check_conflicts(Path::new(&wt)) {
@@ -9871,8 +10003,42 @@ const AGTX_EXCLUDE_END_MARKER: &str = "# /agtx";
 /// Returning false keeps the old exclude rule in place: exposing a malformed
 /// file that may still contain agtx bookkeeping would make it look like task
 /// work and block completion.
-fn migrate_obsolete_omp_mcp(worktree: &Path) -> bool {
+fn is_legacy_agtx_mcp_entry(entry: &serde_json::Value, project_root: &Path) -> bool {
+    let Some(entry) = entry.as_object() else {
+        return false;
+    };
+    if entry.len() != 2 {
+        return false;
+    }
+    let command_is_agtx = entry
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|command| Path::new(command).file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "agtx" || name == "agtx.exe" || name.starts_with("agtx-"));
+    let Some(args) = entry.get("args").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    if !command_is_agtx || args.len() != 2 || args[0].as_str() != Some("mcp-serve") {
+        return false;
+    }
+    let Some(configured_root) = args[1].as_str() else {
+        return false;
+    };
+    let expected = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    Path::new(configured_root)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(configured_root))
+        == expected
+}
+
+fn migrate_obsolete_omp_mcp(worktree: &Path, project_root: &Path) -> bool {
     let path = worktree.join(".omp/mcp.json");
+    if git::ensure_destination_path_safe(worktree, &path).is_err() {
+        return false;
+    }
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return !path.exists();
     };
@@ -9885,7 +10051,14 @@ fn migrate_obsolete_omp_mcp(worktree: &Path) -> bool {
 
     let removed = match root_obj.get_mut("mcpServers") {
         None => return true,
-        Some(serde_json::Value::Object(servers)) => servers.remove("agtx").is_some(),
+        Some(serde_json::Value::Object(servers)) => match servers.get("agtx") {
+            None => false,
+            Some(entry) if is_legacy_agtx_mcp_entry(entry, project_root) => {
+                servers.remove("agtx");
+                true
+            }
+            Some(_) => return false,
+        },
         Some(_) => return false,
     };
     if !removed {
@@ -9908,6 +10081,34 @@ fn migrate_obsolete_omp_mcp(worktree: &Path) -> bool {
         )
         .is_ok()
     }
+}
+
+fn migrate_all_obsolete_omp_mcp(worktree: &Path) -> bool {
+    let Ok(output) = std::process::Command::new("git")
+        .current_dir(worktree)
+        .args(["worktree", "list", "--porcelain", "-z"])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let worktrees: Vec<PathBuf> = String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter_map(|field| field.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .collect();
+    let Some(project_root) = worktrees.first() else {
+        return false;
+    };
+    let mut all_migrated = true;
+    for path in &worktrees {
+        if !migrate_obsolete_omp_mcp(path, project_root) {
+            all_migrated = false;
+        }
+    }
+    all_migrated
 }
 
 fn agtx_exclude_block_bounds(lines: &[&str]) -> Option<(usize, usize)> {
@@ -9983,7 +10184,7 @@ fn exclude_agtx_files_from_git(worktree: &Path) {
             .iter()
             .any(|line| OBSOLETE_AGTX_WRITTEN_PATHS.contains(&line.trim()))
     });
-    let omp_migrated = !owns_obsolete_omp_rule || migrate_obsolete_omp_mcp(worktree);
+    let omp_migrated = !owns_obsolete_omp_rule || migrate_all_obsolete_omp_mcp(worktree);
     if let Some((start, end)) = block_bounds {
         let had_trailing_newline = existing.ends_with('\n');
 
@@ -9999,16 +10200,21 @@ fn exclude_agtx_files_from_git(worktree: &Path) {
             })
             .map(|line| (*line).to_string())
             .collect();
-        let mut updated_lines: Vec<String> =
-            lines[..start].iter().map(|line| (*line).to_string()).collect();
+        let mut updated_lines: Vec<String> = lines[..start]
+            .iter()
+            .map(|line| (*line).to_string())
+            .collect();
         updated_lines.push(AGTX_EXCLUDE_MARKER.to_string());
         updated_lines.push(
             "# Only untracked files are affected; anything this project tracks is untouched."
                 .to_string(),
         );
-        updated_lines
-            .push("# Delete this block to see them in git status again.".to_string());
-        updated_lines.extend(AGTX_WRITTEN_PATHS.iter().map(|pattern| (*pattern).to_string()));
+        updated_lines.push("# Delete this block to see them in git status again.".to_string());
+        updated_lines.extend(
+            AGTX_WRITTEN_PATHS
+                .iter()
+                .map(|pattern| (*pattern).to_string()),
+        );
         if !omp_migrated {
             updated_lines.extend(
                 OBSOLETE_AGTX_WRITTEN_PATHS
@@ -10403,7 +10609,7 @@ fn setup_task_worktree(
         plugin,
         &agent_refs,
         agent_hooks,
-    );
+    )?;
 
     // Copy referenced task artifacts into .agtx/references/
     if !referenced_tasks.is_empty() {
@@ -10490,7 +10696,13 @@ fn setup_task_worktree(
         agent_ops.build_interactive_command(&launch_text)
     } else {
         let has_skill_support = resolve_skill_command(
-            plugin, "planning", base_agent_name, "", task.cycle, &task.id, true,
+            plugin,
+            "planning",
+            base_agent_name,
+            "",
+            task.cycle,
+            &task.id,
+            true,
         )
         .is_some();
         if has_skill_support {
@@ -12374,6 +12586,29 @@ fn should_resume_instance(
     instance_name != base_agent_name && (resume_on_switch || base_agent_name == "omp")
 }
 
+fn deploy_agent_switch(
+    task: &Task,
+    project_path: &Path,
+    plugin: &Option<WorkflowPlugin>,
+    target_base_agent: &str,
+    needs_switch: bool,
+    agent_hooks: bool,
+) -> Result<()> {
+    if !needs_switch {
+        return Ok(());
+    }
+    let Some(worktree_path) = task.worktree_path.as_deref() else {
+        return Ok(());
+    };
+    write_skills_to_worktree(
+        worktree_path,
+        project_path,
+        plugin,
+        &[target_base_agent],
+        agent_hooks,
+    )
+}
+
 /// Spawn a background thread that optionally switches agent, waits for readiness,
 /// then sends a skill command and prompt to the tmux pane.
 #[allow(clippy::too_many_arguments)]
@@ -12381,11 +12616,11 @@ fn spawn_send_to_agent(
     tmux_ops: Arc<dyn TmuxOperations>,
     agent_registry: Arc<dyn agent::AgentRegistry>,
     task_id: String,
-    agent_hooks: bool,
     auto_trust: bool,
     target: String,
     current_base_agent: String,
     target_agent: String,
+    target_session_agent: SessionAgent,
     target_base_agent: String,
     needs_switch: bool,
     resume_on_switch: bool,
@@ -12400,59 +12635,31 @@ fn spawn_send_to_agent(
     task_content: String,
     auto_dismiss: Vec<crate::config::AutoDismiss>,
     worktree_path: Option<String>,
-    project_path: std::path::PathBuf,
     plugin: Option<WorkflowPlugin>,
 ) {
     std::thread::spawn(move || {
-        // If the tmux window is gone, recover it with the agent's resume command
-        {
-            let agent_ops = agent_registry.get(&target_agent);
-            ensure_window_or_recover(
-                tmux_ops.as_ref(),
-                &target,
-                agent_ops.as_ref(),
-                worktree_path.as_deref(),
-                &task_id,
-            );
-        }
+        let agent_ops = operations_for_session_agent(
+            &target_agent,
+            &target_session_agent,
+            agent_registry.as_ref(),
+        );
+        // If the tmux window is gone, recover it with the persisted target session.
+        ensure_window_or_recover(
+            tmux_ops.as_ref(),
+            &target,
+            agent_ops.as_ref(),
+            worktree_path.as_deref(),
+            &task_id,
+        );
 
         let mut delivered_at_launch = false;
         if needs_switch {
-            // Deploy skills for the incoming agent only if its native skill directory
-            // doesn't exist yet. This handles the case where a worktree was created
-            // with a different agent (e.g. Claude for planning) and a new agent
-            // (e.g. OpenCode for review) is switched in later.
-            if let Some(ref wt_path) = worktree_path {
-                let already_deployed = skills::agent_native_skill_dir(&target_base_agent)
-                    .map(|(base, namespace)| {
-                        let dir = if namespace.is_empty() {
-                            Path::new(wt_path).join(base)
-                        } else {
-                            Path::new(wt_path).join(base).join(namespace)
-                        };
-                        dir.exists()
-                    })
-                    .unwrap_or(true); // no native path for this agent — nothing to deploy
-                if !already_deployed {
-                    write_skills_to_worktree(
-                        wt_path,
-                        &project_path,
-                        &plugin,
-                        &[&target_base_agent],
-                        agent_hooks,
-                    );
-                }
-            }
-            let agent_ops = agent_registry.get(&target_agent);
             // A named instance owns a distinct persisted conversation. Always ask
             // it to continue when switching back: OMP starts a fresh session when
             // the profile has no prior session for this worktree, and resumes the
             // right one even when the return happens within the first task cycle.
-            let resume_target = should_resume_instance(
-                &target_agent,
-                &target_base_agent,
-                resume_on_switch,
-            );
+            let resume_target =
+                should_resume_instance(&target_agent, &target_base_agent, resume_on_switch);
             let launch_text = compose_launch_text(skill_cmd_launch.as_deref(), &prompt);
             delivered_at_launch = !resume_target
                 && agent::spec::can_launch_with_prompt(agent_ops.prompt_injection(), &launch_text);
@@ -12468,7 +12675,8 @@ fn spawn_send_to_agent(
             switch_agent_in_tmux(tmux_ops.as_ref(), &target, &current_base_agent, &new_cmd);
             if !delivered_at_launch {
                 // The *new* agent is what has to become ready.
-                let _ = wait_for_agent_ready(&tmux_ops, &target, Some(&target_base_agent), auto_trust);
+                let _ =
+                    wait_for_agent_ready(&tmux_ops, &target, Some(&target_base_agent), auto_trust);
             }
         }
         if !delivered_at_launch {
@@ -13076,12 +13284,14 @@ fn phase_artifact_fresh(
         return artifact_path_exists(worktree_path, rel_template, cycle);
     }
     let entered_at = std::time::SystemTime::from(entered_at);
-    [format!("{:02}", cycle), cycle.to_string()].iter().any(|phase_str| {
-        let full = Path::new(worktree_path).join(rel_template.replace("{phase}", phase_str));
-        std::fs::metadata(&full)
-            .and_then(|m| m.modified())
-            .is_ok_and(|mtime| mtime >= entered_at)
-    })
+    [format!("{:02}", cycle), cycle.to_string()]
+        .iter()
+        .any(|phase_str| {
+            let full = Path::new(worktree_path).join(rel_template.replace("{phase}", phase_str));
+            std::fs::metadata(&full)
+                .and_then(|m| m.modified())
+                .is_ok_and(|mtime| mtime >= entered_at)
+        })
 }
 
 /// `Ready` only once the agent's turn is over.
@@ -13204,10 +13414,12 @@ fn needs_agent_switch(config: &MergedConfig, task: &Task, phase: &str) -> (Strin
 fn collect_phase_agents(config: &MergedConfig, task: &Task) -> Vec<String> {
     let mut agents: Vec<String> = Vec::new();
     if !task.agent.is_empty() {
-        agents.push(config.base_agent_name(&task.agent).to_string());
+        agents.push(current_session_base_agent(task, config));
     }
     for phase in &["research", "planning", "running", "review"] {
-        let agent = config.base_agent_name(phase_agent(config, task, phase)).to_string();
+        let agent = config
+            .base_agent_name(phase_agent(config, task, phase))
+            .to_string();
         if !agents.contains(&agent) {
             agents.push(agent);
         }
@@ -13356,7 +13568,11 @@ fn run_orchestrator_catchup(db: &Database, tasks: &[Task], project_path: Option<
 /// Check if an agent is actively running in the pane.
 /// Uses both `pane_current_command` (works for Claude, Codex, Copilot) and
 /// pane content indicators (works for Gemini which runs inside bash).
-fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str, base_agent_name: Option<&str>) -> bool {
+fn is_agent_active(
+    tmux_ops: &dyn TmuxOperations,
+    target: &str,
+    base_agent_name: Option<&str>,
+) -> bool {
     // Check 1: agent process visible in pane_current_command
     if !is_pane_at_shell(tmux_ops, target) {
         return true;
@@ -13937,10 +14153,7 @@ fn wait_for_agent_ready(
 }
 
 /// Load the workflow plugin selected by a task without applying agent filtering.
-fn load_task_plugin_candidate(
-    task: &Task,
-    project_path: Option<&Path>,
-) -> Option<WorkflowPlugin> {
+fn load_task_plugin_candidate(task: &Task, project_path: Option<&Path>) -> Option<WorkflowPlugin> {
     match &task.plugin {
         Some(name) => WorkflowPlugin::load(name, project_path)
             .ok()
@@ -14117,7 +14330,11 @@ fn refresh_stale_worktree_configs(
                 "Re-deploying agent configs: worktree was set up by a different agtx binary"
             );
             let refs: Vec<&str> = agent_names.iter().map(|s| s.as_str()).collect();
-            write_skills_to_worktree(&worktree, &project_path, &plugin, &refs, agent_hooks);
+            if let Err(error) =
+                write_skills_to_worktree(&worktree, &project_path, &plugin, &refs, agent_hooks)
+            {
+                tracing::warn!(%worktree, %error, "Refusing unsafe agent config refresh");
+            }
         }
     });
 }
@@ -14247,16 +14464,92 @@ fn merge_hook_events(
     }
 }
 
+fn managed_config_paths(worktree: &Path, spec: &agent::AgentSpec) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(kind) = spec.mcp_config {
+        match kind {
+            agent::McpConfigKind::ClaudeJson => {
+                paths.push(worktree.join(".mcp.json"));
+                paths.push(worktree.join(".claude/settings.local.json"));
+            }
+            agent::McpConfigKind::CodexToml => paths.push(worktree.join(".codex/config.toml")),
+            agent::McpConfigKind::GeminiJson => paths.push(worktree.join(".gemini/settings.json")),
+            agent::McpConfigKind::CursorJson => paths.push(worktree.join(".cursor/mcp.json")),
+            agent::McpConfigKind::GrokTomlMerge => paths.push(worktree.join(".grok/config.toml")),
+            agent::McpConfigKind::AntigravityJsonMerge => {
+                paths.push(worktree.join(".agents/mcp_config.json"));
+            }
+            agent::McpConfigKind::PiJsonMerge => paths.push(worktree.join(".pi/mcp.json")),
+            agent::McpConfigKind::OmpPlugin => {
+                paths.push(worktree.join(".agtx/omp-plugin/plugin.json"));
+                paths.push(worktree.join(".agtx/omp-plugin/mcp.json"));
+            }
+            agent::McpConfigKind::OpenCode => paths.push(worktree.join("opencode.json")),
+        }
+    }
+    if let Some(kind) = spec.hook_config {
+        let relative = match kind {
+            agent::HookConfigKind::ClaudeSettings => ".claude/settings.local.json",
+            agent::HookConfigKind::GeminiSettings => ".gemini/settings.json",
+            agent::HookConfigKind::CodexHooksJson => ".codex/hooks.json",
+            agent::HookConfigKind::CursorHooksJson => ".cursor/hooks.json",
+            agent::HookConfigKind::GrokHooksJson => ".grok/hooks/agtx.json",
+            agent::HookConfigKind::AntigravityHooksJson => ".agents/hooks.json",
+        };
+        paths.push(worktree.join(relative));
+    }
+    paths
+}
+
+fn managed_skill_path(spec: &agent::AgentSpec, skill_name: &str, native_dir: &Path) -> PathBuf {
+    match spec.skill_layout {
+        agent::SkillLayout::SkillDir => native_dir.join(skill_name).join("SKILL.md"),
+        _ => native_dir.join(skills::skill_dir_to_filename(skill_name, spec.name)),
+    }
+}
+
+fn ensure_deployment_paths_safe(worktree: &Path, base_agent_names: &[&str]) -> Result<()> {
+    let mut paths = vec![worktree.join(DEPLOY_MARKER)];
+    for (skill_name, _) in skills::BUILTIN_SKILLS {
+        paths.push(
+            worktree
+                .join(".agtx/skills")
+                .join(skill_name)
+                .join("SKILL.md"),
+        );
+    }
+    for agent_name in base_agent_names {
+        let Some(spec) = agent::spec(agent_name) else {
+            continue;
+        };
+        paths.extend(managed_config_paths(worktree, spec));
+        if let Some((base_dir, namespace)) = spec.skill_dir {
+            let native_dir = if namespace.is_empty() {
+                worktree.join(base_dir)
+            } else {
+                worktree.join(base_dir).join(namespace)
+            };
+            for (skill_name, _) in skills::BUILTIN_SKILLS {
+                paths.push(managed_skill_path(spec, skill_name, &native_dir));
+            }
+        }
+    }
+    for path in paths {
+        git::ensure_destination_path_safe(worktree, &path)?;
+    }
+    Ok(())
+}
+
 fn write_skills_to_worktree(
     worktree_path: &str,
     project_path: &Path,
     plugin: &Option<WorkflowPlugin>,
     base_agent_names: &[&str],
     agent_hooks: bool,
-) {
-    // Before anything else agtx writes here, so the files below are invisible to
-    // git the moment they appear.
-    exclude_agtx_files_from_git(Path::new(worktree_path));
+) -> Result<()> {
+    let worktree = Path::new(worktree_path);
+    ensure_deployment_paths_safe(worktree, base_agent_names)?;
+    exclude_agtx_files_from_git(worktree);
 
     // Replay the project's existing trust onto this worktree, for the one agent
     // that needs it. Antigravity matches trusted paths **exactly** — no ancestor
@@ -14361,6 +14654,7 @@ fn write_skills_to_worktree(
             }
         }
     }
+    Ok(())
 }
 
 /// Write one agent's lifecycle-hook config into its worktree.
