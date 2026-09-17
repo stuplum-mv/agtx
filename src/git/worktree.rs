@@ -155,10 +155,21 @@ pub fn initialize_worktree(
         if !metadata.is_dir() && !metadata.file_type().is_symlink() {
             continue;
         }
+        match first_symlink_component(project_path, &src) {
+            Ok(Some(symlink)) => {
+                append_skipped_symlink_warnings(&mut warnings, project_path, vec![symlink]);
+                continue;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warnings.push(format!("Failed to inspect '{}': {}", dir_name, e));
+                continue;
+            }
+        }
 
         let dst = worktree_path.join(dir_name);
         let mut skipped_symlinks = Vec::new();
-        if let Err(e) = copy_dir_recursive_impl(&src, &dst, &mut skipped_symlinks) {
+        if let Err(e) = copy_dir_recursive_impl(&src, &dst, worktree_path, &mut skipped_symlinks) {
             warnings.push(format!("Failed to copy '{}' to worktree: {}", dir_name, e));
         }
         append_skipped_symlink_warnings(&mut warnings, project_path, skipped_symlinks);
@@ -180,9 +191,22 @@ pub fn initialize_worktree(
                     continue;
                 }
             }
+            match first_symlink_component(project_path, &src) {
+                Ok(Some(symlink)) => {
+                    append_skipped_symlink_warnings(&mut warnings, project_path, vec![symlink]);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warnings.push(format!("Failed to inspect '{}': {}", dir_name, e));
+                    continue;
+                }
+            }
             let dst = worktree_path.join(dir_name);
             let mut skipped_symlinks = Vec::new();
-            if let Err(e) = copy_dir_recursive_impl(&src, &dst, &mut skipped_symlinks) {
+            if let Err(e) =
+                copy_dir_recursive_impl(&src, &dst, worktree_path, &mut skipped_symlinks)
+            {
                 warnings.push(format!("Failed to copy '{}' to worktree: {}", dir_name, e));
             }
             append_skipped_symlink_warnings(&mut warnings, project_path, skipped_symlinks);
@@ -235,14 +259,23 @@ pub fn initialize_worktree(
                     }
                 }
             }
-            if metadata.file_type().is_symlink() {
-                append_skipped_symlink_warnings(&mut warnings, project_path, vec![src.clone()]);
-                continue;
+            match first_symlink_component(project_path, &src) {
+                Ok(Some(symlink)) => {
+                    append_skipped_symlink_warnings(&mut warnings, project_path, vec![symlink]);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warnings.push(format!("Failed to inspect '{}': {}", file_name, e));
+                    continue;
+                }
             }
 
             if metadata.is_dir() {
                 let mut skipped_symlinks = Vec::new();
-                if let Err(e) = copy_dir_recursive_impl(&src, &dst, &mut skipped_symlinks) {
+                if let Err(e) =
+                    copy_dir_recursive_impl(&src, &dst, worktree_path, &mut skipped_symlinks)
+                {
                     warnings.push(format!(
                         "Failed to copy directory '{}' to worktree: {}",
                         file_name, e
@@ -251,15 +284,17 @@ pub fn initialize_worktree(
                 append_skipped_symlink_warnings(&mut warnings, project_path, skipped_symlinks);
             } else {
                 if let Some(parent) = dst.parent() {
-                    if !parent.exists() {
-                        if let Err(e) = std::fs::create_dir_all(parent) {
-                            warnings.push(format!(
-                                "Failed to create directory for '{}': {}",
-                                file_name, e
-                            ));
-                            continue;
-                        }
+                    if let Err(e) = create_destination_dir(worktree_path, parent) {
+                        warnings.push(format!(
+                            "Failed to create directory for '{}': {}",
+                            file_name, e
+                        ));
+                        continue;
                     }
+                }
+                if let Err(e) = ensure_destination_path_safe(worktree_path, &dst) {
+                    warnings.push(format!("Failed to copy '{}' to worktree: {}", file_name, e));
+                    continue;
                 }
                 if let Err(e) = std::fs::copy(&src, &dst) {
                     warnings.push(format!("Failed to copy '{}' to worktree: {}", file_name, e));
@@ -308,10 +343,83 @@ fn append_skipped_symlink_warnings(
     }
 }
 
+/// Return the first symlink between `root` and `path`, including `path`.
+///
+/// Looking only at `symlink_metadata(path)` misses an intermediate alias in a
+/// configured path such as `alias/config.toml`.
+fn first_symlink_component(root: &Path, path: &Path) -> Result<Option<PathBuf>> {
+    let relative = path
+        .strip_prefix(root)
+        .with_context(|| format!("'{}' is outside '{}'", path.display(), root.display()))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(name) => current.push(name),
+            std::path::Component::CurDir => continue,
+            _ => anyhow::bail!("path '{}' escapes '{}'", path.display(), root.display()),
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(None)
+}
+
+/// Reject any existing symlink at or below the trusted destination root.
+fn ensure_destination_path_safe(root: &Path, path: &Path) -> Result<()> {
+    let relative = path.strip_prefix(root).with_context(|| {
+        format!(
+            "destination '{}' is outside '{}'",
+            path.display(),
+            root.display()
+        )
+    })?;
+
+    if std::fs::symlink_metadata(root)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        anyhow::bail!("destination root '{}' is a symlink", root.display());
+    }
+
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(name) => current.push(name),
+            std::path::Component::CurDir => continue,
+            _ => anyhow::bail!(
+                "destination path '{}' escapes '{}'",
+                path.display(),
+                root.display()
+            ),
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!("destination path '{}' is a symlink", current.display())
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+fn create_destination_dir(root: &Path, path: &Path) -> Result<()> {
+    ensure_destination_path_safe(root, path)?;
+    std::fs::create_dir_all(path)?;
+    // Inspect every component that now exists before writing a child through it.
+    ensure_destination_path_safe(root, path)
+}
+
 /// Recursively copy a directory and its contents without following symlinks.
 pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     let mut skipped_symlinks = Vec::new();
-    copy_dir_recursive_impl(src, dst, &mut skipped_symlinks)?;
+    let destination_root = dst.parent().unwrap_or(dst);
+    copy_dir_recursive_impl(src, dst, destination_root, &mut skipped_symlinks)?;
     if !skipped_symlinks.is_empty() {
         anyhow::bail!(
             "skipped {} symlink(s) while recursively copying '{}'",
@@ -325,6 +433,7 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 fn copy_dir_recursive_impl(
     src: &Path,
     dst: &Path,
+    destination_root: &Path,
     skipped_symlinks: &mut Vec<PathBuf>,
 ) -> Result<()> {
     let metadata = std::fs::symlink_metadata(src)?;
@@ -333,7 +442,7 @@ fn copy_dir_recursive_impl(
         return Ok(());
     }
 
-    std::fs::create_dir_all(dst)?;
+    create_destination_dir(destination_root, dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
@@ -342,8 +451,9 @@ fn copy_dir_recursive_impl(
         if metadata.file_type().is_symlink() {
             skipped_symlinks.push(src_path);
         } else if metadata.is_dir() {
-            copy_dir_recursive_impl(&src_path, &dst_path, skipped_symlinks)?;
+            copy_dir_recursive_impl(&src_path, &dst_path, destination_root, skipped_symlinks)?;
         } else {
+            ensure_destination_path_safe(destination_root, &dst_path)?;
             std::fs::copy(&src_path, &dst_path)?;
         }
     }

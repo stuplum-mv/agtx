@@ -983,6 +983,113 @@ fn test_initialize_worktree_reports_symlinks_in_configured_directories() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn test_initialize_worktree_rejects_intermediate_source_symlinks() {
+    let project = setup_git_repo();
+    let worktree_path = git::create_worktree(project.path(), "source-ancestor-symlinks").unwrap();
+
+    let file_source = project.path().join("real-files");
+    std::fs::create_dir(&file_source).unwrap();
+    std::fs::write(file_source.join("config.toml"), "secret = false").unwrap();
+    std::os::unix::fs::symlink(&file_source, project.path().join("file-alias")).unwrap();
+
+    let dir_source = project.path().join("real-dirs/nested");
+    std::fs::create_dir_all(&dir_source).unwrap();
+    std::fs::write(dir_source.join("settings.json"), "{}").unwrap();
+    std::os::unix::fs::symlink(
+        project.path().join("real-dirs"),
+        project.path().join("dir-alias"),
+    )
+    .unwrap();
+
+    let warnings = git::initialize_worktree(
+        project.path(),
+        &worktree_path,
+        Some("file-alias/config.toml"),
+        None,
+        &["dir-alias/nested".to_string()],
+    );
+
+    assert!(!worktree_path.join("file-alias/config.toml").exists());
+    assert!(!worktree_path.join("dir-alias/nested").exists());
+    for alias in ["file-alias", "dir-alias"] {
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains(alias) && warning.contains("symlink")),
+            "the intermediate source symlink should be reported: {warnings:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_initialize_worktree_rejects_branch_specific_destination_symlink() {
+    let project = setup_git_repo();
+    let external = TempDir::new().unwrap();
+
+    let run_git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(project.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    run_git(&["checkout", "-q", "-b", "destination-symlink"]);
+    std::os::unix::fs::symlink(external.path(), project.path().join("copied-output")).unwrap();
+    run_git(&["add", "copied-output"]);
+    run_git(&["commit", "-q", "-m", "add destination symlink"]);
+    run_git(&["checkout", "-q", "main"]);
+
+    std::fs::create_dir(project.path().join("copied-output")).unwrap();
+    std::fs::write(
+        project.path().join("copied-output/config.toml"),
+        "project config",
+    )
+    .unwrap();
+
+    let worktree_path = git::create_worktree_from_base(
+        project.path(),
+        "destination-symlink-copy",
+        "destination-symlink",
+        git::DEFAULT_WORKTREE_DIR,
+    )
+    .unwrap();
+    assert!(
+        std::fs::symlink_metadata(worktree_path.join("copied-output"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "precondition: the destination branch supplies a symlink"
+    );
+
+    let warnings = git::initialize_worktree(
+        project.path(),
+        &worktree_path,
+        Some("copied-output/config.toml"),
+        None,
+        &[],
+    );
+
+    assert!(
+        !external.path().join("config.toml").exists(),
+        "copying must not write through the destination symlink"
+    );
+    assert!(
+        warnings.iter().any(|warning| {
+            warning.contains("copied-output") && warning.contains("destination path")
+        }),
+        "the unsafe destination should be reported: {warnings:?}"
+    );
+}
+
 // =============================================================================
 // merge_task_branch — integrating a task branch into its base
 // =============================================================================
