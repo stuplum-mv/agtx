@@ -642,10 +642,69 @@ model = "cursor/gpt-5.6-sol:high"  # optional; use a value from `omp --list-mode
 ```
 
 The schema is agent-neutral: instances without adapter-specific settings can also provide multiple
-names for the same base agent. OMP is the first adapter that additionally maps `profile` and `model`
-to CLI flags.
+names for the same base agent. Fixed `model` values are supported for Claude Code, Codex, Gemini,
+OpenCode, Cursor Agent, and OMP. OMP also supports `profile`.
+
+### Jev model routing
+
+Optional model routing chooses a capability tier when an instance first enters a phase, then maps
+that tier to a model understood by the base harness. It is disabled when `[model_routing]` is absent.
+
+```toml
+[model_routing]
+router = "jev"
+api_key_env = "TYPESAFE_API_KEY"
+endpoint = "https://api.typesafe.ai/v1/systemone"
+jev_model = "jev-latest"
+timeout_ms = 3500
+confidence_threshold = 0.34
+
+[model_routing.phases.research]
+fallback = "standard"
+minimum = "standard"
+
+[model_routing.phases.planning]
+fallback = "high"
+minimum = "high"
+
+[model_routing.phases.running]
+fallback = "standard"
+minimum = "standard"
+
+[model_routing.phases.review]
+fallback = "high"
+minimum = "high"
+
+[model_routing.models.claude]
+quick = "haiku"
+standard = "sonnet"
+high = "opus"
+premium = "opus"
+
+[model_routing.models.codex]
+quick = "gpt-5.1-codex-mini"
+standard = "gpt-5.2-codex"
+high = "gpt-5.3-codex"
+premium = "gpt-5.3-codex"
+```
+
+Set the environment variable named by `api_key_env`; the key is never written to disk. Jev receives
+the task text, phase, and base-agent name. If the key, API, response, or selected tier is unavailable,
+agtx starts the harness with the configured fallback model. Low-confidence choices also use the
+fallback, while `minimum` prevents a phase from selecting a weaker tier.
+
+A fixed `model` on a named instance takes precedence and bypasses Jev. A routed decision is made
+once per task instance and reused for launch, resume, and later returns to that instance, even after
+a config reload. Use distinct named instances when phases need distinct conversations or models.
+A project-local `[model_routing]` replaces the global routing section; because it can select an API
+endpoint and key environment variable, it is ignored until the project config is trusted.
+
+Routing adapters are verified for Claude Code, Codex, Gemini, OpenCode, Cursor Agent, and OMP.
+Copilot, Grok, Antigravity, and Earendil Pi keep their normal/default model until their CLI adapter is
+verified.
 
 #### Oh My Pi (OMP) setup
+
 
 OMP is a separate agent from Earendil Pi (`pi`). Install it using an
 [upstream-supported method](https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent); the command

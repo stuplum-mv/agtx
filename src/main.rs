@@ -28,6 +28,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             Some("update") => return run_update(&raw[2..]),
+            Some("model-route") => return agtx::model_router::run_cli(&raw[2..]),
             _ => {}
         }
     }

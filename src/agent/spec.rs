@@ -354,7 +354,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         api_key_env: &["ANTHROPIC_API_KEY"],
         env: &[],
         profile_flag: None,
-        model_flag: None,
+        model_flag: Some("--model"),
         base_args: &["--dangerously-skip-permissions"],
         prompt_form: PromptForm::Argv,
         // Verified against claude 2.1.241: `claude [prompt]` starts an
@@ -448,7 +448,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         api_key_env: &["OPENAI_API_KEY", "CODEX_API_KEY"],
         env: &[],
         profile_flag: None,
-        model_flag: None,
+        model_flag: Some("--model"),
         base_args: &["--sandbox", "workspace-write"],
         prompt_form: PromptForm::Argv,
         // Verified against codex-cli 0.144.5: `codex --sandbox workspace-write
@@ -592,7 +592,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // things it may gate, but it is not what grants the inheritance.
         env: &[("GEMINI_TRUST_WORKSPACE", "true")],
         profile_flag: None,
-        model_flag: None,
+        model_flag: Some("--model"),
         base_args: &["--approval-mode", "yolo"],
         prompt_form: PromptForm::Flag("-i"),
         // Verified against gemini 0.46.0: `gemini … -i '<prompt>'` delivers the
@@ -644,7 +644,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         ],
         env: &[],
         profile_flag: None,
-        model_flag: None,
+        model_flag: Some("--model"),
         base_args: &[],
         // `--prompt`, not `-p`: opencode has no `-p` short form at all, so the
         // previous value would have failed the moment it was used. Verified
@@ -686,7 +686,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         api_key_env: &["CURSOR_API_KEY"],
         env: &[],
         profile_flag: None,
-        model_flag: None,
+        model_flag: Some("--model"),
         // `--trust` is "trust the current workspace without prompting". It is not
         // an escalation on top of `--yolo`, which already auto-runs every tool —
         // refusing the narrower flag while passing the broader one would be
@@ -1041,6 +1041,30 @@ pub fn compose_command_with_options(
     profile: Option<&str>,
     model: Option<&str>,
 ) -> String {
+    compose_command_with_model_word(spec, args, prompt, profile, model, None)
+}
+
+/// Compose a command whose model is resolved by a trusted shell word such as
+/// an agtx `model-route` command substitution. Fixed and dynamic models are
+/// mutually exclusive; callers must give configured fixed models precedence.
+pub fn compose_command_with_dynamic_model(
+    spec: &AgentSpec,
+    args: &[&str],
+    prompt: Option<&str>,
+    profile: Option<&str>,
+    model_word: &str,
+) -> String {
+    compose_command_with_model_word(spec, args, prompt, profile, None, Some(model_word))
+}
+
+fn compose_command_with_model_word(
+    spec: &AgentSpec,
+    args: &[&str],
+    prompt: Option<&str>,
+    profile: Option<&str>,
+    model: Option<&str>,
+    dynamic_model_word: Option<&str>,
+) -> String {
     let mut out = String::new();
     for (key, value) in spec.env {
         out.push_str(key);
@@ -1049,12 +1073,23 @@ pub fn compose_command_with_options(
         out.push(' ');
     }
     out.push_str(spec.binary);
-    for (flag, value) in [(spec.profile_flag, profile), (spec.model_flag, model)] {
-        if let (Some(flag), Some(value)) = (flag, value) {
+    if let (Some(flag), Some(value)) = (spec.profile_flag, profile) {
+        out.push(' ');
+        out.push_str(flag);
+        out.push(' ');
+        out.push_str(&shell_quote(value));
+    }
+    if let Some(flag) = spec.model_flag {
+        if let Some(value) = model {
             out.push(' ');
             out.push_str(flag);
             out.push(' ');
             out.push_str(&shell_quote(value));
+        } else if let Some(word) = dynamic_model_word {
+            out.push(' ');
+            out.push_str(flag);
+            out.push(' ');
+            out.push_str(word);
         }
     }
     for arg in args {
@@ -1171,5 +1206,14 @@ mod tests {
         assert_eq!(omp.hook_config, None);
         assert_ne!(omp.name, pi.name);
         assert_ne!(omp.binary, pi.binary);
+    }
+    #[test]
+    fn only_verified_harnesses_advertise_model_selection() {
+        for name in ["claude", "codex", "gemini", "opencode", "cursor", "omp"] {
+            assert_eq!(spec(name).unwrap().model_flag, Some("--model"), "{name}");
+        }
+        for name in ["copilot", "grok", "antigravity", "pi"] {
+            assert_eq!(spec(name).unwrap().model_flag, None, "{name}");
+        }
     }
 }

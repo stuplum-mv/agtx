@@ -8364,6 +8364,7 @@ fn only_an_instance_that_has_run_is_a_resume_target() {
             base_agent: "omp".to_string(),
             profile: Some("running".to_string()),
             model: None,
+            model_route: None,
         },
     );
     task.session_agents.insert(
@@ -8372,6 +8373,7 @@ fn only_an_instance_that_has_run_is_a_resume_target() {
             base_agent: "claude".to_string(),
             profile: None,
             model: None,
+            model_route: None,
         },
     );
 
@@ -8399,12 +8401,13 @@ fn switching_a_to_b_to_a_preserves_each_instance_and_resumes_only_on_return() {
         base_agent: "omp".to_string(),
         profile: Some("original-a".to_string()),
         model: Some("cursor/gpt-5.6-sol".to_string()),
+        model_route: None,
     };
     task.session_agents
         .insert("omp-a".to_string(), original_a.clone());
 
     let registry = MockAgentRegistry::new();
-    let b = session_agent_for_target(&config, &task, "omp-b");
+    let b = session_agent_for_target(&config, &task, "omp-b", "running");
     let b_ops = operations_for_session_agent("omp-b", &b, &registry);
     let first_b = build_instance_launch_command(
         b_ops.as_ref(),
@@ -8415,7 +8418,7 @@ fn switching_a_to_b_to_a_preserves_each_instance_and_resumes_only_on_return() {
     assert!(!first_b.contains("--continue"), "{first_b}");
     task.session_agents.insert("omp-b".to_string(), b.clone());
 
-    let returned_a = session_agent_for_target(&config, &task, "omp-a");
+    let returned_a = session_agent_for_target(&config, &task, "omp-a", "running");
     let a_ops = operations_for_session_agent("omp-a", &returned_a, &registry);
     let second_a = build_instance_launch_command(
         a_ops.as_ref(),
@@ -8437,6 +8440,7 @@ fn a_plain_builtin_agent_resumes_after_it_has_run() {
         base_agent: "claude".to_string(),
         profile: None,
         model: None,
+        model_route: None,
     };
     let operations = operations_for_session_agent("claude", &snapshot, &registry);
 
@@ -8499,6 +8503,7 @@ fn config_reload_updates_new_launches_without_reinterpreting_live_sessions() {
             base_agent: "omp".to_string(),
             profile: Some("review".to_string()),
             model: Some("cursor/gpt-5.6-sol".to_string()),
+            model_route: None,
         },
     );
     app.state.board.tasks = vec![task];
@@ -8543,11 +8548,12 @@ fn unchanged_instance_keeps_its_persisted_session_profile() {
             base_agent: "omp".to_string(),
             profile: Some("review".to_string()),
             model: Some("cursor/gpt-5.6-sol".to_string()),
+            model_route: None,
         },
     );
 
     assert_eq!(
-        session_agent_for_target(&config, &task, "reviewer"),
+        session_agent_for_target(&config, &task, "reviewer", "review"),
         task.session_agents["reviewer"].clone()
     );
 }
@@ -8575,6 +8581,7 @@ fn refresh_backfills_live_sessions_created_before_snapshots_existed() {
         base_agent: "omp".to_string(),
         profile: Some("review".to_string()),
         model: Some("cursor/gpt-5.6-sol".to_string()),
+        model_route: None,
     };
     assert_eq!(
         app.state.board.tasks[0].session_agents["reviewer"],
@@ -8623,6 +8630,7 @@ fn failed_switch_deployment_does_not_advance_agent_state() {
             base_agent: "claude".to_string(),
             profile: None,
             model: None,
+            model_route: None,
         },
     );
 
@@ -18142,5 +18150,93 @@ fn a_refresh_verdict_for_a_status_the_task_has_left_is_dropped() {
             Some((PhaseStatus::Ready, _))
         ),
         "a verdict for the task's current status still applies"
+    );
+}
+
+#[test]
+fn model_routing_prepares_once_and_reuses_the_instance_snapshot() {
+    let _data_guard = redirect_data_dir();
+    let global: GlobalConfig = toml::from_str(
+        r#"
+[model_routing.phases.planning]
+fallback = "standard"
+minimum = "standard"
+[model_routing.models.claude]
+quick = "haiku"
+standard = "sonnet"
+high = "opus"
+premium = "opus-max"
+"#,
+    )
+    .unwrap();
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    let mut task = make_test_task(
+        &uuid::Uuid::new_v4().to_string(),
+        "Route this task",
+        TaskStatus::Planning,
+    );
+    task.description = Some("A sufficiently detailed private task prompt".to_string());
+
+    let snapshot = session_agent_for_target(&config, &task, "claude", "planning");
+    let route = snapshot.model_route.as_ref().expect("route metadata");
+    let request_path = Path::new(&route.request_path);
+    assert!(request_path.exists());
+    let request: crate::model_router::ModelRouteRequest =
+        serde_json::from_slice(&std::fs::read(request_path).unwrap()).unwrap();
+    assert_eq!(request.base_agent, "claude");
+    assert_eq!(request.phase, "planning");
+    assert_eq!(request.prompt.as_deref(), task.description.as_deref());
+
+    task.session_agents
+        .insert("claude".to_string(), snapshot.clone());
+    let without_routing = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
+    assert_eq!(
+        session_agent_for_target(&without_routing, &task, "claude", "review"),
+        snapshot,
+        "returning to an instance must preserve its original route"
+    );
+}
+
+#[test]
+fn fixed_models_missing_maps_and_unverified_harnesses_skip_routing() {
+    let _data_guard = redirect_data_dir();
+    let global: GlobalConfig = toml::from_str(
+        r#"
+[agent_profiles.fixed-reviewer]
+agent = "claude"
+model = "fixed-opus"
+
+[model_routing.phases.review]
+fallback = "high"
+minimum = "high"
+[model_routing.models.claude]
+high = "routed-opus"
+[model_routing.models.pi]
+high = "unverified-pi-model"
+"#,
+    )
+    .unwrap();
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    let task = make_test_task(
+        &uuid::Uuid::new_v4().to_string(),
+        "Routing bypasses",
+        TaskStatus::Review,
+    );
+
+    assert!(
+        session_agent_for_target(&config, &task, "fixed-reviewer", "review")
+            .model_route
+            .is_none()
+    );
+    assert!(session_agent_for_target(&config, &task, "pi", "review")
+        .model_route
+        .is_none());
+    assert!(session_agent_for_target(&config, &task, "codex", "review")
+        .model_route
+        .is_none());
+    assert!(
+        session_agent_for_target(&config, &task, "claude", "research")
+            .model_route
+            .is_none()
     );
 }

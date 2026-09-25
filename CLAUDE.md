@@ -75,6 +75,7 @@ src/
 │   └── operations.rs # AgentOperations/CodingAgent traits (mockable)
 ├── core/{actions.rs (allowed_actions + CallerKind), input.rs (submit_message, parking)}
 ├── mcp/server.rs     # MCP server (JSON-RPC over stdio) — global and project-scoped modes
+├── model_router.rs   # Jev tier selection, durable requests/decisions, model-route fast path
 ├── web/              # `agtx serve` — the board over HTTP (feature = "serve")
 │   └── mod.rs, routes.rs, writes.rs, ws.rs, state.rs, auth.rs, assets.rs, qr.rs, tunnel.rs
 ├── update/{mod.rs, version.rs, check.rs, github.rs, release.rs, install.rs}
@@ -319,7 +320,16 @@ review = "omp-review"
 [agent_profiles.omp-review]  # Named instance; schema is generic
 agent = "omp"                # Base identity used for specs/plugins/hooks
 profile = "review"           # Optional adapter-specific selector
-model = "provider/model"     # Optional adapter-specific selector
+model = "provider/model"     # Optional adapter-specific selector; bypasses routing
+
+[model_routing]               # Optional Jev phase-entry router
+api_key_env = "TYPESAFE_API_KEY"
+[model_routing.phases.planning]
+fallback = "high"
+minimum = "high"
+[model_routing.models.claude]
+standard = "sonnet"
+high = "opus"
 
 [worktree]                   # WorktreeConfig
 enabled = true
@@ -336,6 +346,7 @@ Per-project overrides at `{project}/.agtx/config.toml` (`ProjectConfig`), merged
 |-------|---------|
 | `default_agent`, `agents` | Global fallback / per-phase named-instance overrides |
 | `agent_profiles` | Named instance → base agent with optional profile/model; project entries replace same-named global entries |
+| `model_routing` | Optional Jev phase/tier policy and base-harness model map; project section replaces global |
 | `base_branch` | Branch worktrees are cut from |
 | `github_url` | Repo URL for PR operations |
 | `worktree_dir` | Where worktrees are created |
@@ -351,8 +362,16 @@ tracks the active instance, `Task::base_agent` stores the wizard fallback, and
 name for plugin compatibility, skills, hooks, readiness, or lifecycle behavior; resolve those from
 the snapshot/configured base identity.
 
+Model routing is phase-entry only. Resolution is fixed profile model → Jev capability tier →
+`model_routing.models.<base-agent>` model. The TUI writes an owner-only request under
+`AGTX_DATA_DIR/model-routes`, and command composition invokes the early `agtx model-route` CLI in a
+quoted shell substitution for both launch and resume. The helper persists one decision, scrubs the
+prompt, prints only the model on stdout, and fails open to the concrete fallback. Keep API keys out
+of snapshots: requests store only the environment-variable name. Only harnesses with a verified
+`AgentSpec::model_flag` may route.
+
 ### Project Trust
-`init_script`, `cleanup_script`, `copy_files` are stripped from an untrusted project's config at startup (`App::new`) with a warning banner. Trust is a **canonical path → SHA-256 of `.agtx/config.toml`** map in `TrustStore` (`trusted_projects.toml`); editing the config invalidates trust. A project with no `.agtx/config.toml` is trusted by default. An untrusted project also forces `flags.no_init_scripts = true`. Approve via the in-TUI popup (any key) or `agtx trust`.
+`init_script`, `cleanup_script`, `copy_files`, and `model_routing` are stripped from an untrusted project's config at startup (`App::new`) with a warning banner. Trust is a **canonical path → SHA-256 of `.agtx/config.toml`** map in `TrustStore` (`trusted_projects.toml`); editing the config invalidates trust. A project with no `.agtx/config.toml` is trusted by default. An untrusted project also forces `flags.no_init_scripts = true`. Approve via the in-TUI popup (any key) or `agtx trust`.
 
 **agtx's own writes re-record trust** — any write to `.agtx/config.toml` (`P`, config editor save) changes the hash. `TrustStore::retrust_after_agtx_write` restores the *prior* decision, gated on the trust state read **before** the write. `TrustStore::path()`/`GlobalConfig::config_path()` honour `AGTX_CONFIG_DIR`; `Database::data_root` honours `AGTX_DATA_DIR`. `--no-init-scripts` suppresses scripts regardless of trust.
 

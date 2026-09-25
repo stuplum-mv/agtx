@@ -136,37 +136,68 @@ impl Agent {
     /// Build the shell command to resume the agent's most recent session
     /// in the current working directory. Used to recover from tmux/server restarts.
     pub fn build_resume_command(&self) -> String {
+        self.build_resume_command_with_dynamic_model(None)
+    }
+
+    pub fn build_resume_command_with_dynamic_model(&self, model_word: Option<&str>) -> String {
         let Some(s) = spec::spec(self.base_name()) else {
             // Nothing is known about how this agent resumes; start it fresh.
-            return self.build_interactive_command("");
+            return self.build_interactive_command_with_dynamic_model("", model_word);
         };
         let resume_args: Vec<&str> = match s.resume {
             spec::ResumeArgs::Append(extra) => s.base_args.iter().chain(extra).copied().collect(),
             spec::ResumeArgs::Replace(args) => args.to_vec(),
         };
-        spec::compose_command_with_options(
-            s,
-            &resume_args,
-            None,
-            self.profile.as_deref(),
-            self.model.as_deref(),
-        )
+        match model_word.filter(|_| self.model.is_none()) {
+            Some(model_word) => spec::compose_command_with_dynamic_model(
+                s,
+                &resume_args,
+                None,
+                self.profile.as_deref(),
+                model_word,
+            ),
+            None => spec::compose_command_with_options(
+                s,
+                &resume_args,
+                None,
+                self.profile.as_deref(),
+                self.model.as_deref(),
+            ),
+        }
     }
 
     /// Build the shell command to start the agent interactively.
     /// When prompt is empty, the agent starts with no initial message
     /// (task content and skill commands are sent later via tmux send_keys).
     pub fn build_interactive_command(&self, prompt: &str) -> String {
-        match spec::spec(self.base_name()) {
-            Some(s) => spec::compose_command_with_options(
+        self.build_interactive_command_with_dynamic_model(prompt, None)
+    }
+
+    pub fn build_interactive_command_with_dynamic_model(
+        &self,
+        prompt: &str,
+        model_word: Option<&str>,
+    ) -> String {
+        match (
+            spec::spec(self.base_name()),
+            model_word.filter(|_| self.model.is_none()),
+        ) {
+            (Some(s), Some(model_word)) => spec::compose_command_with_dynamic_model(
+                s,
+                s.base_args,
+                Some(prompt),
+                self.profile.as_deref(),
+                model_word,
+            ),
+            (Some(s), None) => spec::compose_command_with_options(
                 s,
                 s.base_args,
                 Some(prompt),
                 self.profile.as_deref(),
                 self.model.as_deref(),
             ),
-            None if prompt.is_empty() => self.command.clone(),
-            None => format!("{} '{}'", self.command, prompt.replace('\'', "'\"'\"'")),
+            (None, _) if prompt.is_empty() => self.command.clone(),
+            (None, _) => format!("{} '{}'", self.command, prompt.replace('\'', "'\"'\"'")),
         }
     }
 }

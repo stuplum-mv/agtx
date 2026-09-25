@@ -51,11 +51,22 @@ pub trait AgentOperations: Send + Sync {
 /// Generic agent implementation that works with any Agent config
 pub struct CodingAgent {
     agent: Agent,
+    dynamic_model_word: Option<String>,
 }
 
 impl CodingAgent {
     pub fn new(agent: Agent) -> Self {
-        Self { agent }
+        Self {
+            agent,
+            dynamic_model_word: None,
+        }
+    }
+
+    pub fn with_dynamic_model(agent: Agent, model_word: String) -> Self {
+        Self {
+            agent,
+            dynamic_model_word: Some(model_word),
+        }
     }
 }
 
@@ -81,11 +92,15 @@ impl AgentOperations for CodingAgent {
     }
 
     fn build_interactive_command(&self, prompt: &str) -> String {
-        self.agent.build_interactive_command(prompt)
+        self.agent.build_interactive_command_with_dynamic_model(
+            prompt,
+            self.dynamic_model_word.as_deref(),
+        )
     }
 
     fn build_resume_command(&self) -> String {
-        self.agent.build_resume_command()
+        self.agent
+            .build_resume_command_with_dynamic_model(self.dynamic_model_word.as_deref())
     }
 
     fn prompt_injection(&self) -> crate::agent::PromptInjection {
@@ -272,5 +287,33 @@ mod tests {
             registry.get("also-missing").build_interactive_command(""),
             "claude --dangerously-skip-permissions"
         );
+    }
+    #[test]
+    fn dynamic_model_is_used_for_launch_and_resume() {
+        let agent = super::super::get_agent("claude").unwrap();
+        let routed = CodingAgent::with_dynamic_model(
+            agent,
+            "\"$('/opt/agtx' model-route '/tmp/route.json' 'sonnet')\"".to_string(),
+        );
+        assert_eq!(
+            routed.build_interactive_command("fix it"),
+            "claude --model \"$('/opt/agtx' model-route '/tmp/route.json' 'sonnet')\" --dangerously-skip-permissions 'fix it'"
+        );
+        assert_eq!(
+            routed.build_resume_command(),
+            "claude --model \"$('/opt/agtx' model-route '/tmp/route.json' 'sonnet')\" --dangerously-skip-permissions --continue"
+        );
+    }
+
+    #[test]
+    fn fixed_model_wins_over_dynamic_model() {
+        let base = super::super::get_agent("omp").unwrap();
+        let fixed =
+            super::super::Agent::named("omp-work", &base, None, Some("fixed/model".to_string()));
+        let routed = CodingAgent::with_dynamic_model(fixed, "$(ignored)".to_string());
+        assert!(routed
+            .build_resume_command()
+            .contains("--model 'fixed/model'"));
+        assert!(!routed.build_resume_command().contains("ignored"));
     }
 }

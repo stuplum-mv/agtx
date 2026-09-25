@@ -108,6 +108,7 @@ fn test_merged_config_project_overrides() {
         default_agent: Some("codex".to_string()),
         agents: None,
         agent_profiles: None,
+        model_routing: None,
         base_branch: Some("develop".to_string()),
         worktree_dir: None,
         github_url: Some("https://github.com/user/repo".to_string()),
@@ -974,4 +975,72 @@ agent = "omp"
     let merged = MergedConfig::merge(&invalid_default, &ProjectConfig::default());
     assert_eq!(merged.agent_for_phase("planning"), "claude");
     assert_eq!(merged.base_agent_name("missing-profile"), "claude");
+}
+
+#[test]
+fn model_routing_config_deserializes_generic_harness_routes() {
+    let config: GlobalConfig = toml::from_str(
+        r#"
+[model_routing]
+api_key_env = "JEV_TEST_KEY"
+endpoint = "https://router.example.test/choose"
+confidence_threshold = 0.7
+
+[model_routing.phases.planning]
+fallback = "high"
+minimum = "standard"
+
+[model_routing.models.codex]
+quick = "codex-mini"
+standard = "codex-standard"
+high = "codex-high"
+premium = "codex-premium"
+"#,
+    )
+    .unwrap();
+
+    let routing = config.model_routing.unwrap();
+    assert_eq!(routing.api_key_env, "JEV_TEST_KEY");
+    assert_eq!(routing.endpoint, "https://router.example.test/choose");
+    assert_eq!(routing.confidence_threshold, 0.7);
+    let planning = routing.phases.get("planning").unwrap();
+    assert_eq!(planning.fallback, agtx::model_router::ModelTier::High);
+    assert_eq!(planning.minimum, agtx::model_router::ModelTier::Standard);
+    assert_eq!(
+        routing.models.get("codex").unwrap().premium.as_deref(),
+        Some("codex-premium")
+    );
+}
+
+#[test]
+fn project_model_routing_replaces_global_policy() {
+    let global: GlobalConfig = toml::from_str(
+        r#"
+[model_routing]
+endpoint = "https://global.example.test"
+
+[model_routing.models.claude]
+standard = "global-sonnet"
+"#,
+    )
+    .unwrap();
+    let project: ProjectConfig = toml::from_str(
+        r#"
+[model_routing]
+endpoint = "https://project.example.test"
+
+[model_routing.models.gemini]
+standard = "project-gemini"
+"#,
+    )
+    .unwrap();
+
+    let merged = MergedConfig::merge(&global, &project);
+    let routing = merged.model_routing.unwrap();
+    assert_eq!(routing.endpoint, "https://project.example.test");
+    assert!(!routing.models.contains_key("claude"));
+    assert_eq!(
+        routing.models.get("gemini").unwrap().standard.as_deref(),
+        Some("project-gemini")
+    );
 }

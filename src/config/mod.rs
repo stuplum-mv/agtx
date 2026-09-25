@@ -1,3 +1,4 @@
+use crate::model_router::ModelRoutingConfig;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -17,6 +18,10 @@ pub struct GlobalConfig {
     /// Named agent instances backed by a supported base agent.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_profiles: BTreeMap<String, AgentProfileConfig>,
+
+    /// Optional phase-entry model routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_routing: Option<ModelRoutingConfig>,
 
     /// Worktree settings
     #[serde(default)]
@@ -75,6 +80,7 @@ impl Default for GlobalConfig {
             default_agent: default_agent(),
             agents: PhaseAgentsConfig::default(),
             agent_profiles: BTreeMap::new(),
+            model_routing: None,
             worktree: WorktreeConfig::default(),
             theme: ThemeConfig::default(),
             fullscreen_on_enter: false,
@@ -275,6 +281,10 @@ pub struct ProjectConfig {
     /// Project entries replace same-named global instances.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_profiles: Option<BTreeMap<String, AgentProfileConfig>>,
+
+    /// Project-local policy replaces global model routing when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_routing: Option<ModelRoutingConfig>,
 
     /// Override base branch for this project
     pub base_branch: Option<String>,
@@ -629,7 +639,7 @@ fn merge_table_named(
 /// Optional keys on `GlobalConfig`. Everything else it writes is required, so
 /// it is always re-emitted and can never need deleting.
 const GLOBAL_MANAGED: ManagedKeys = ManagedKeys {
-    root: &["agent_profiles"],
+    root: &["agent_profiles", "model_routing"],
     nested: &[("agents", &["research", "planning", "running", "review"])],
 };
 
@@ -640,6 +650,7 @@ const PROJECT_MANAGED: ManagedKeys = ManagedKeys {
         // `[agents]` section rather than leaving an empty header behind.
         "agents",
         "agent_profiles",
+        "model_routing",
         "default_agent",
         "base_branch",
         "github_url",
@@ -774,6 +785,7 @@ pub struct MergedConfig {
     pub default_agent: String,
     pub phase_agents: PhaseAgentsConfig,
     pub agent_profiles: BTreeMap<String, AgentProfileConfig>,
+    pub model_routing: Option<ModelRoutingConfig>,
     pub worktree_enabled: bool,
     pub skip_worktree: bool,
     pub auto_cleanup: bool,
@@ -814,6 +826,10 @@ impl MergedConfig {
                 review: project_agents.review.or(global.agents.review.clone()),
             },
             agent_profiles,
+            model_routing: project
+                .model_routing
+                .clone()
+                .or_else(|| global.model_routing.clone()),
             worktree_enabled: global.worktree.enabled,
             skip_worktree: project.skip_worktree.unwrap_or(!global.worktree.enabled),
             auto_cleanup: global.worktree.auto_cleanup,
@@ -1273,6 +1289,7 @@ mod managed_keys_tests {
                     model: None,
                 },
             )])),
+            model_routing: None,
             base_branch: Some("main".into()),
             github_url: Some("https://example.invalid".into()),
             worktree_dir: Some(".agtx/worktrees".into()),

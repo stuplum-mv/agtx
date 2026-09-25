@@ -57,10 +57,18 @@ impl TaskStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionModelRoute {
+    pub request_path: String,
+    pub fallback_model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionAgent {
     pub base_agent: String,
     pub profile: Option<String>,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_route: Option<SessionModelRoute>,
 }
 
 /// A task on the kanban board

@@ -5,6 +5,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{prelude::*, widgets::*};
+use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Stdout};
@@ -22,10 +23,13 @@ use crate::core::input::{
     composer_holds, delivery_needle, pane_shows, submit_message, COMPOSER_TAIL_LINES,
     SUBMIT_ATTEMPTS, SUBMIT_CONFIRM_POLLS,
 };
-use crate::db::{Database, PhaseStatus, SessionAgent, Task, TaskStatus, TransitionRequest};
+use crate::db::{
+    Database, PhaseStatus, SessionAgent, SessionModelRoute, Task, TaskStatus, TransitionRequest,
+};
 use crate::git::{
     self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps,
 };
+use crate::model_router::{self, ModelRouteRequest};
 use crate::skills;
 use crate::tmux::{
     self, pane_tail, InputConfig, InputError, PaneInput, PaneInputSink, RealTmuxOps, TmuxOperations,
@@ -797,16 +801,18 @@ fn session_agent_for_instance(config: &MergedConfig, instance_name: &str) -> Ses
             base_agent: profile.agent.clone(),
             profile: profile.profile.clone(),
             model: profile.model.clone(),
+            model_route: None,
         },
         None => SessionAgent {
             base_agent: config.base_agent_name(instance_name).to_string(),
             profile: None,
             model: None,
+            model_route: None,
         },
     }
 }
 
-fn session_agent_for_target(
+fn session_agent_snapshot_for_target(
     config: &MergedConfig,
     task: &Task,
     instance_name: &str,
@@ -815,6 +821,84 @@ fn session_agent_for_target(
         .get(instance_name)
         .cloned()
         .unwrap_or_else(|| session_agent_for_instance(config, instance_name))
+}
+
+fn session_agent_for_target(
+    config: &MergedConfig,
+    task: &Task,
+    instance_name: &str,
+    phase: &str,
+) -> SessionAgent {
+    let mut snapshot = session_agent_snapshot_for_target(config, task, instance_name);
+    if !task.session_agents.contains_key(instance_name) {
+        snapshot.model_route = prepare_model_route(config, task, instance_name, phase, &snapshot);
+    }
+    snapshot
+}
+
+/// Prepare the trusted, self-contained request consumed by `agtx model-route`.
+/// Failures disable routing for this launch; they must never prevent an agent
+/// from starting with its own default model.
+fn prepare_model_route(
+    config: &MergedConfig,
+    task: &Task,
+    instance_name: &str,
+    phase: &str,
+    snapshot: &SessionAgent,
+) -> Option<SessionModelRoute> {
+    // A fixed instance model always wins. Unsupported adapters also stay on the
+    // harness default instead of pretending a routed model was applied.
+    if snapshot.model.is_some()
+        || agent::spec::spec(&snapshot.base_agent)?
+            .model_flag
+            .is_none()
+    {
+        return None;
+    }
+
+    let routing = config.model_routing.as_ref()?;
+    if routing.router != "jev" {
+        return None;
+    }
+    let policy = routing.phase(phase)?;
+    let routes = routing.routes_for(&snapshot.base_agent)?.clone();
+    let fallback_tier = policy.fallback.at_least(policy.minimum);
+    let fallback_model = routes.model_for(fallback_tier)?.to_string();
+
+    let mut hasher = Sha256::new();
+    hasher.update(instance_name.as_bytes());
+    let instance_key = format!("{:x}", hasher.finalize());
+    let request_path = GlobalConfig::data_dir()
+        .ok()?
+        .join("model-routes")
+        .join(&task.id)
+        .join(format!("{instance_key}.json"));
+
+    if !request_path.exists() {
+        let request = ModelRouteRequest {
+            prompt: Some(task.content_text()),
+            phase: model_router::canonical_phase(phase).to_string(),
+            base_agent: snapshot.base_agent.clone(),
+            fallback_model: fallback_model.clone(),
+            routes,
+            api_key_env: routing.api_key_env.clone(),
+            endpoint: routing.endpoint.clone(),
+            jev_model: routing.jev_model.clone(),
+            timeout_ms: routing.timeout_ms,
+            confidence_threshold: routing.confidence_threshold,
+            minimum: policy.minimum,
+            fallback: policy.fallback,
+            decision: None,
+        };
+        if model_router::write_request(&request_path, &request).is_err() {
+            return None;
+        }
+    }
+
+    Some(SessionModelRoute {
+        request_path: request_path.to_string_lossy().into_owned(),
+        fallback_model,
+    })
 }
 
 fn current_session_base_agent(task: &Task, config: &MergedConfig) -> String {
@@ -831,12 +915,27 @@ fn operations_for_session_agent(
 ) -> Arc<dyn AgentOperations> {
     agent::get_agent(&snapshot.base_agent)
         .map(|base| {
-            Arc::new(agent::CodingAgent::new(agent::Agent::named(
+            let configured = agent::Agent::named(
                 instance_name,
                 &base,
                 snapshot.profile.clone(),
                 snapshot.model.clone(),
-            ))) as Arc<dyn AgentOperations>
+            );
+            let coding = snapshot
+                .model_route
+                .as_ref()
+                .and_then(|route| {
+                    std::env::current_exe().ok().map(|agtx_bin| {
+                        let word = model_router::dynamic_model_word(
+                            &agtx_bin,
+                            Path::new(&route.request_path),
+                            &route.fallback_model,
+                        );
+                        agent::CodingAgent::with_dynamic_model(configured.clone(), word)
+                    })
+                })
+                .unwrap_or_else(|| agent::CodingAgent::new(configured));
+            Arc::new(coding) as Arc<dyn AgentOperations>
         })
         .unwrap_or_else(|| registry.get(instance_name))
 }
@@ -974,22 +1073,14 @@ impl App {
 
                     // Trust-on-first-use: suppress dangerous config fields from untrusted projects
                     let trust_store = crate::config::TrustStore::load().unwrap_or_default();
-                    let trust_warning = if !trust_store.is_trusted(&canonical) {
-                        if project_config.init_script.is_some()
-                            || project_config.copy_files.is_some()
-                            || project_config.cleanup_script.is_some()
-                        {
-                            tracing::warn!(
-                                project = %canonical.display(),
-                                "Untrusted project config — init_script, cleanup_script, and copy_files suppressed"
-                            );
-                            project_config.init_script = None;
-                            project_config.cleanup_script = None;
-                            project_config.copy_files = None;
-                            Some("Untrusted project config: init_script, cleanup_script, and copy_files disabled. Run `agtx trust` to enable.".to_string())
-                        } else {
-                            None
-                        }
+                    let trust_warning = if !trust_store.is_trusted(&canonical)
+                        && suppress_untrusted_project_fields(&mut project_config)
+                    {
+                        tracing::warn!(
+                            project = %canonical.display(),
+                            "Untrusted project config — executable and model-routing fields suppressed"
+                        );
+                        Some("Untrusted project config: scripts, copied files, and model routing disabled. Run `agtx trust` to enable.".to_string())
                     } else {
                         None
                     };
@@ -4072,7 +4163,16 @@ impl App {
             .state
             .project_path
             .as_ref()
-            .map(|path| ProjectConfig::load(path).unwrap_or_default())
+            .map(|path| {
+                let mut project = ProjectConfig::load(path).unwrap_or_default();
+                let trusted = crate::config::TrustStore::load()
+                    .map(|store| store.is_trusted(path))
+                    .unwrap_or(false);
+                if !trusted {
+                    suppress_untrusted_project_fields(&mut project);
+                }
+                project
+            })
             .unwrap_or_default();
         let config = MergedConfig::merge(&global, &project);
         self.install_config_for_current_project(config);
@@ -4216,7 +4316,11 @@ impl App {
 
         // Refresh merged config and cached plugin
         let global_config = GlobalConfig::load().unwrap_or_default();
-        let config = MergedConfig::merge(&global_config, &project_config);
+        let mut effective_project_config = project_config;
+        if !was_trusted {
+            suppress_untrusted_project_fields(&mut effective_project_config);
+        }
+        let config = MergedConfig::merge(&global_config, &effective_project_config);
         self.install_config_for_current_project(config);
         self.state.cached_plugin = Some(load_plugin_if_configured(
             &self.state.config,
@@ -6169,7 +6273,7 @@ impl App {
 
         let current_base_agent = current_session_base_agent(task, &self.state.config);
         let planning_session_agent =
-            session_agent_for_target(&self.state.config, task, &planning_agent);
+            session_agent_for_target(&self.state.config, task, &planning_agent, "planning");
         let planning_base_agent = planning_session_agent.base_agent.clone();
 
         let has_live_session = task_has_live_session(&task, self.state.tmux_ops.as_ref());
@@ -6429,7 +6533,7 @@ impl App {
         if let Some(session_name) = &task.session_name {
             let current_base_agent = current_session_base_agent(task, &self.state.config);
             let running_session_agent =
-                session_agent_for_target(&self.state.config, task, &running_agent);
+                session_agent_for_target(&self.state.config, task, &running_agent, "running");
             let running_base_agent = running_session_agent.base_agent.clone();
             let task_content = task.content_text();
             let run_phase = determine_phase_variant(
@@ -6508,7 +6612,7 @@ impl App {
         let (review_agent, agent_switch) = needs_agent_switch(&self.state.config, task, "review");
         let current_base_agent = current_session_base_agent(task, &self.state.config);
         let review_session_agent =
-            session_agent_for_target(&self.state.config, task, &review_agent);
+            session_agent_for_target(&self.state.config, task, &review_agent, "review");
         let review_base_agent = review_session_agent.base_agent.clone();
         let plugin = match self.load_transition_plugin(task, &review_agent) {
             Ok(plugin) => plugin,
@@ -6728,7 +6832,8 @@ impl App {
         let plugin_name = task.plugin.clone();
         let agent_name = phase_agent(&self.state.config, &task, "research").to_string();
         let base_agent_name = self.state.config.base_agent_name(&agent_name).to_string();
-        let research_session_agent = session_agent_for_instance(&self.state.config, &agent_name);
+        let research_session_agent =
+            session_agent_for_target(&self.state.config, &task, &agent_name, "research");
         let plugin = match self.load_transition_plugin(&task, &agent_name) {
             Ok(plugin) => plugin,
             Err(error) => {
@@ -6772,7 +6877,11 @@ impl App {
 
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let git_ops = Arc::clone(&self.state.git_ops);
-        let agent_ops = self.state.agent_registry.get(&agent_name);
+        let agent_ops = operations_for_session_agent(
+            &agent_name,
+            &research_session_agent,
+            self.state.agent_registry.as_ref(),
+        );
 
         let task_id = task.id.clone();
         let task_title = task.title.clone();
@@ -7544,7 +7653,7 @@ impl App {
         let plugin_name = task.plugin.clone();
         let plugin = plugin_check;
         let running_session_agent =
-            session_agent_for_target(&self.state.config, &task, &running_agent);
+            session_agent_for_target(&self.state.config, &task, &running_agent, "running");
         let running_base_agent = running_session_agent.base_agent.clone();
         let all_agents = collect_phase_agents(&self.state.config, &task);
         let prompt = resolve_prompt(&plugin, "running", &task_content, &task.id, task.cycle);
@@ -7757,7 +7866,7 @@ impl App {
                 };
                 let running_has_session = task.session_agents.contains_key(&running_agent);
                 let running_session_agent =
-                    session_agent_for_target(&self.state.config, &task, &running_agent);
+                    session_agent_for_target(&self.state.config, &task, &running_agent, "running");
                 deploy_agent_switch(
                     &task,
                     project_path,
@@ -7841,8 +7950,12 @@ impl App {
                 };
 
                 let planning_has_session = task.session_agents.contains_key(&planning_agent);
-                let planning_session_agent =
-                    session_agent_for_target(&self.state.config, &task, &planning_agent);
+                let planning_session_agent = session_agent_for_target(
+                    &self.state.config,
+                    &task,
+                    &planning_agent,
+                    "planning",
+                );
                 let planning_base_agent = planning_session_agent.base_agent.clone();
                 deploy_agent_switch(
                     &task,
@@ -7970,8 +8083,12 @@ impl App {
                     }
                 };
                 let planning_has_session = task.session_agents.contains_key(&planning_agent);
-                let planning_session_agent =
-                    session_agent_for_target(&self.state.config, &task, &planning_agent);
+                let planning_session_agent = session_agent_for_target(
+                    &self.state.config,
+                    &task,
+                    &planning_agent,
+                    "planning",
+                );
                 deploy_agent_switch(
                     &task,
                     project_path,
@@ -8440,7 +8557,7 @@ impl App {
         let (review_agent, agent_switch) = needs_agent_switch(&self.state.config, task, "review");
         let current_base_agent = current_session_base_agent(task, &self.state.config);
         let review_session_agent =
-            session_agent_for_target(&self.state.config, task, &review_agent);
+            session_agent_for_target(&self.state.config, task, &review_agent, "review");
         let review_base_agent = review_session_agent.base_agent.clone();
         if let Some(session_name) = &task.session_name {
             let plugin = self.load_transition_plugin(task, &review_agent)?;
@@ -8817,7 +8934,7 @@ impl App {
         task: &Task,
         instance_name: &str,
     ) -> Result<Option<WorkflowPlugin>> {
-        let target = session_agent_for_target(&self.state.config, task, instance_name);
+        let target = session_agent_snapshot_for_target(&self.state.config, task, instance_name);
         load_task_plugin_checked(task, self.state.project_path.as_deref(), &target.base_agent)
     }
 
@@ -15309,18 +15426,38 @@ mod tests;
 
 /// The fields a trust prompt is asking permission for, with their values.
 ///
-/// These are exactly the three `App::new` strips from an untrusted project, and
-/// the prompt shows them verbatim: consenting to a script you cannot see is not
-/// consent. Order is fixed so the dialog does not reshuffle between launches.
+/// Strip every project-controlled field that can execute code or send task
+/// content and credentials to a remote endpoint.
+fn suppress_untrusted_project_fields(config: &mut ProjectConfig) -> bool {
+    let dangerous = config.init_script.is_some()
+        || config.cleanup_script.is_some()
+        || config.copy_files.is_some()
+        || config.model_routing.is_some();
+    config.init_script = None;
+    config.cleanup_script = None;
+    config.copy_files = None;
+    config.model_routing = None;
+    dangerous
+}
+
+/// Return suppressed values verbatim for the trust prompt. Order is fixed so
+/// the dialog does not reshuffle between launches.
 fn dangerous_fields(config: &ProjectConfig) -> Vec<(&'static str, String)> {
-    [
+    let mut fields: Vec<(&'static str, String)> = [
         ("init_script", config.init_script.as_ref()),
         ("cleanup_script", config.cleanup_script.as_ref()),
         ("copy_files", config.copy_files.as_ref()),
     ]
     .into_iter()
     .filter_map(|(name, value)| value.map(|v| (name, v.clone())))
-    .collect()
+    .collect();
+    if let Some(routing) = &config.model_routing {
+        fields.push((
+            "model_routing",
+            toml::to_string_pretty(routing).unwrap_or_else(|_| "<invalid>".to_string()),
+        ));
+    }
+    fields
 }
 
 /// Draw the config editor: sections down the left, the selected section's

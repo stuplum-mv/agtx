@@ -1218,6 +1218,7 @@ mod tests {
             base_agent: "omp".to_string(),
             profile: Some("review".to_string()),
             model: Some("provider/model".to_string()),
+            model_route: None,
         };
         task.session_agents
             .insert(task.agent.clone(), snapshot.clone());
@@ -1242,11 +1243,13 @@ mod tests {
             base_agent: "omp".to_string(),
             profile: Some("a".to_string()),
             model: None,
+            model_route: None,
         };
         let snapshot_b = SessionAgent {
             base_agent: "omp".to_string(),
             profile: Some("b".to_string()),
             model: Some("provider/model".to_string()),
+            model_route: None,
         };
         task.session_agents
             .insert("omp-a".to_string(), snapshot_a.clone());
