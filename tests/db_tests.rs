@@ -174,15 +174,26 @@ fn a_session_keeps_the_agent_definition_it_was_launched_with() {
     let db = Database::open_in_memory_project().unwrap();
     let mut task = Task::new("Profiled session", "omp-review", "proj-1");
     task.session_name = Some("session-1".to_string());
-    task.session_agent = Some(SessionAgent {
-        base_agent: "omp".to_string(),
-        profile: Some("review".to_string()),
-        model: Some("cursor/gpt-5.6".to_string()),
-    });
+    task.session_agents.insert(
+        "omp-review".to_string(),
+        SessionAgent {
+            base_agent: "omp".to_string(),
+            profile: Some("review".to_string()),
+            model: Some("cursor/gpt-5.6".to_string()),
+        },
+    );
+    task.session_agents.insert(
+        "claude-plan".to_string(),
+        SessionAgent {
+            base_agent: "claude".to_string(),
+            profile: None,
+            model: Some("opus".to_string()),
+        },
+    );
     db.create_task(&task).unwrap();
 
     let retrieved = db.get_task(&task.id).unwrap().unwrap();
-    assert_eq!(retrieved.session_agent, task.session_agent);
+    assert_eq!(retrieved.session_agents, task.session_agents);
 }
 
 #[test]
@@ -551,7 +562,6 @@ fn test_consume_notifications_atomic_under_concurrent_consumers() {
 
 // === Stable Hash and DB Permissions Tests (Fix 3, Fix 7) ===
 
-use std::path::Path;
 use tempfile::TempDir;
 
 /// Point `Database` at a throwaway data root for the tests below.

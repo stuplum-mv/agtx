@@ -169,7 +169,9 @@ pub fn initialize_worktree(
 
         let dst = worktree_path.join(dir_name);
         let mut skipped_symlinks = Vec::new();
-        if let Err(e) = copy_dir_recursive_impl(&src, &dst, worktree_path, &mut skipped_symlinks) {
+        if let Err(e) =
+            copy_dir_recursive_impl(&src, &dst, worktree_path, &mut skipped_symlinks, true)
+        {
             warnings.push(format!("Failed to copy '{}' to worktree: {}", dir_name, e));
         }
         append_skipped_symlink_warnings(&mut warnings, project_path, skipped_symlinks);
@@ -205,7 +207,7 @@ pub fn initialize_worktree(
             let dst = worktree_path.join(dir_name);
             let mut skipped_symlinks = Vec::new();
             if let Err(e) =
-                copy_dir_recursive_impl(&src, &dst, worktree_path, &mut skipped_symlinks)
+                copy_dir_recursive_impl(&src, &dst, worktree_path, &mut skipped_symlinks, false)
             {
                 warnings.push(format!("Failed to copy '{}' to worktree: {}", dir_name, e));
             }
@@ -274,7 +276,7 @@ pub fn initialize_worktree(
             if metadata.is_dir() {
                 let mut skipped_symlinks = Vec::new();
                 if let Err(e) =
-                    copy_dir_recursive_impl(&src, &dst, worktree_path, &mut skipped_symlinks)
+                    copy_dir_recursive_impl(&src, &dst, worktree_path, &mut skipped_symlinks, false)
                 {
                     warnings.push(format!(
                         "Failed to copy directory '{}' to worktree: {}",
@@ -419,7 +421,7 @@ fn create_destination_dir(root: &Path, path: &Path) -> Result<()> {
 pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     let mut skipped_symlinks = Vec::new();
     let destination_root = dst.parent().unwrap_or(dst);
-    copy_dir_recursive_impl(src, dst, destination_root, &mut skipped_symlinks)?;
+    copy_dir_recursive_impl(src, dst, destination_root, &mut skipped_symlinks, false)?;
     if !skipped_symlinks.is_empty() {
         anyhow::bail!(
             "skipped {} symlink(s) while recursively copying '{}'",
@@ -435,6 +437,7 @@ fn copy_dir_recursive_impl(
     dst: &Path,
     destination_root: &Path,
     skipped_symlinks: &mut Vec<PathBuf>,
+    skip_existing: bool,
 ) -> Result<()> {
     let metadata = std::fs::symlink_metadata(src)?;
     if metadata.file_type().is_symlink() {
@@ -451,9 +454,18 @@ fn copy_dir_recursive_impl(
         if metadata.file_type().is_symlink() {
             skipped_symlinks.push(src_path);
         } else if metadata.is_dir() {
-            copy_dir_recursive_impl(&src_path, &dst_path, destination_root, skipped_symlinks)?;
+            copy_dir_recursive_impl(
+                &src_path,
+                &dst_path,
+                destination_root,
+                skipped_symlinks,
+                skip_existing,
+            )?;
         } else {
             ensure_destination_path_safe(destination_root, &dst_path)?;
+            if skip_existing && dst_path.exists() {
+                continue;
+            }
             std::fs::copy(&src_path, &dst_path)?;
         }
     }

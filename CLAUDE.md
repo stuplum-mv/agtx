@@ -169,7 +169,7 @@ Commands are written once canonical (`/ns:command`) and auto-translated: Claude/
 ### Sending Skills & Prompts to Agents
 Two lanes.
 
-**Launch lane** (first message of a task's life, and **an agent switch**): skill + prompt composed by `compose_launch_text()` and handed to the process in **argv**. Gated by `spec::can_launch_with_prompt()`: `AgentSpec::launch_prompt_verified` (all but copilot) and a prompt under `MAX_LAUNCH_PROMPT_BYTES` (128 KiB). A **same-agent** advance cannot use it (process already running → typed lane). `create_window` nests inside `sh -c '…'` so a prompt there is quoted twice (`single_quote()` in `src/tmux/operations.rs` is the second layer; the switch path types into a running shell — one level). `resolve_skill_command(collapse: false)` keeps `{task}` paragraphs; `spec::normalize_prompt()` strips control chars. `setup_task_worktree` returns `(target, launched_with_prompt)`; callers skip the send when true.
+**Launch lane** (first message of a task's life, and the first visit to a switched agent instance): skill + prompt composed by `compose_launch_text()` and handed to the process in **argv**. Returning to an instance recorded in `Task::session_agents` resumes it instead. Gated by `spec::can_launch_with_prompt()`: `AgentSpec::launch_prompt_verified` (all but copilot) and a prompt under `MAX_LAUNCH_PROMPT_BYTES` (128 KiB). A **same-agent** advance cannot use it (process already running → typed lane). `create_window` nests inside `sh -c '…'` so a prompt there is quoted twice (`single_quote()` in `src/tmux/operations.rs` is the second layer; the switch path types into a running shell — one level). `resolve_skill_command(collapse: false)` keeps `{task}` paragraphs; `spec::normalize_prompt()` strips control chars. `setup_task_worktree` returns `(target, launched_with_prompt)`; callers skip the send when true.
 
 **Mid-session lane** — `send_skill_and_prompt()`, three paths:
 1. **opencode** — its picker strips arguments typed all at once. Send bare command name → wait for picker → Enter → send args → Enter.
@@ -310,11 +310,16 @@ agent_hooks = true           # Write agent lifecycle-hook configs into worktrees
 auto_trust = false           # Answer agents' trust / bypass-permission prompts by reading the pane
 update_check = true          # Daily GitHub release check + header notice
 
-[agents]                     # Per-phase agent overrides (PhaseAgentsConfig)
+[agents]                     # Per-phase instance overrides (PhaseAgentsConfig)
 research = "claude"
 planning = "claude"
 running = "codex"
-review = "claude"
+review = "omp-review"
+
+[agent_profiles.omp-review]  # Named instance; schema is generic
+agent = "omp"                # Base identity used for specs/plugins/hooks
+profile = "review"           # Optional adapter-specific selector
+model = "provider/model"     # Optional adapter-specific selector
 
 [worktree]                   # WorktreeConfig
 enabled = true
@@ -329,7 +334,8 @@ Per-project overrides at `{project}/.agtx/config.toml` (`ProjectConfig`), merged
 
 | Field | Purpose |
 |-------|---------|
-| `default_agent`, `agents` | Agent / per-phase agent overrides |
+| `default_agent`, `agents` | Global fallback / per-phase named-instance overrides |
+| `agent_profiles` | Named instance → base agent with optional profile/model; project entries replace same-named global entries |
 | `base_branch` | Branch worktrees are cut from |
 | `github_url` | Repo URL for PR operations |
 | `worktree_dir` | Where worktrees are created |
@@ -338,6 +344,12 @@ Per-project overrides at `{project}/.agtx/config.toml` (`ProjectConfig`), merged
 | `workflow_plugin` | Active plugin for new tasks |
 | `branch_prefix` | Branch name prefix |
 | `skip_worktree` | Work directly in the project root |
+
+Agent precedence is explicit phase instance → task wizard fallback → global default. `Task::agent`
+tracks the active instance, `Task::base_agent` stores the wizard fallback, and
+`Task::session_agents` stores immutable launch snapshots by instance name. Do not use the instance
+name for plugin compatibility, skills, hooks, readiness, or lifecycle behavior; resolve those from
+the snapshot/configured base identity.
 
 ### Project Trust
 `init_script`, `cleanup_script`, `copy_files` are stripped from an untrusted project's config at startup (`App::new`) with a warning banner. Trust is a **canonical path → SHA-256 of `.agtx/config.toml`** map in `TrustStore` (`trusted_projects.toml`); editing the config invalidates trust. A project with no `.agtx/config.toml` is trusted by default. An untrusted project also forces `flags.no_init_scripts = true`. Approve via the in-TUI popup (any key) or `agtx trust`.

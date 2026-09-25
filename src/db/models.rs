@@ -1,6 +1,7 @@
 use crate::tmux::safe_session_name;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Task status in the kanban board
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,7 +82,11 @@ pub struct Task {
     pub base_agent: Option<String>,
     pub project_id: String,
     pub session_name: Option<String>,
-    pub session_agent: Option<SessionAgent>,
+    /// Immutable launch definitions for the agent instances that have run in
+    /// this task's worktree, keyed by configured instance name. Presence also
+    /// records that an instance has run, so its first visit launches fresh.
+    #[serde(default)]
+    pub session_agents: BTreeMap<String, SessionAgent>,
     pub worktree_path: Option<String>,
     pub branch_name: Option<String>,
     pub pr_number: Option<i32>,
@@ -120,7 +125,7 @@ impl Task {
             agent,
             project_id: project_id.into(),
             session_name: None,
-            session_agent: None,
+            session_agents: BTreeMap::new(),
             worktree_path: None,
             branch_name: None,
             pr_number: None,

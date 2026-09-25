@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     event::{DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind},
     execute,
@@ -789,11 +789,10 @@ pub struct App {
     state: AppState,
 }
 
-/// Add configured instances whose base agent is actually available. The cloned
-/// base retains its command metadata while the instance carries profile/model
-/// selection into the registry operations.
+/// Resolve the launch definition currently configured for an instance.
+/// Once the instance runs, the snapshot stored on the task takes precedence.
 fn session_agent_for_instance(config: &MergedConfig, instance_name: &str) -> SessionAgent {
-    match config.agent_profiles.get(instance_name) {
+    match config.named_agent_profile(instance_name) {
         Some(profile) => SessionAgent {
             base_agent: profile.agent.clone(),
             profile: profile.profile.clone(),
@@ -812,18 +811,15 @@ fn session_agent_for_target(
     task: &Task,
     instance_name: &str,
 ) -> SessionAgent {
-    if task.agent == instance_name {
-        task.session_agent
-            .clone()
-            .unwrap_or_else(|| session_agent_for_instance(config, instance_name))
-    } else {
-        session_agent_for_instance(config, instance_name)
-    }
+    task.session_agents
+        .get(instance_name)
+        .cloned()
+        .unwrap_or_else(|| session_agent_for_instance(config, instance_name))
 }
 
 fn current_session_base_agent(task: &Task, config: &MergedConfig) -> String {
-    task.session_agent
-        .as_ref()
+    task.session_agents
+        .get(&task.agent)
         .map(|snapshot| snapshot.base_agent.clone())
         .unwrap_or_else(|| config.base_agent_name(&task.agent).to_string())
 }
@@ -845,16 +841,31 @@ fn operations_for_session_agent(
         .unwrap_or_else(|| registry.get(instance_name))
 }
 
+fn build_instance_launch_command(
+    operations: &dyn AgentOperations,
+    has_session: bool,
+    opening_message: &str,
+) -> String {
+    if has_session {
+        operations.build_resume_command()
+    } else {
+        operations.build_interactive_command(opening_message)
+    }
+}
+
 fn operations_for_task_session(
     task: &Task,
     registry: &dyn agent::AgentRegistry,
 ) -> Arc<dyn AgentOperations> {
-    task.session_agent
-        .as_ref()
+    task.session_agents
+        .get(&task.agent)
         .map(|snapshot| operations_for_session_agent(&task.agent, snapshot, registry))
         .unwrap_or_else(|| registry.get(&task.agent))
 }
 
+/// Add configured instances whose base agent is actually available. The cloned
+/// base retains its command metadata while the instance carries profile/model
+/// selection into the registry operations.
 fn configured_available_agents(
     mut available: Vec<agent::Agent>,
     config: &MergedConfig,
@@ -1585,8 +1596,9 @@ impl App {
                             task.session_name = Some(result.session_name);
                             task.worktree_path = Some(result.worktree_path);
                             task.branch_name = Some(result.branch_name);
+                            task.session_agents
+                                .insert(result.agent.clone(), result.session_agent);
                             task.agent = result.agent;
-                            task.session_agent = Some(result.session_agent);
                             task.plugin = result.plugin;
                             if let Some(status) = result.new_status {
                                 task.status = status;
@@ -4224,7 +4236,7 @@ impl App {
 
                 // Update task status immediately
                 task.session_name = None;
-                task.session_agent = None;
+                task.session_agents.clear();
                 task.worktree_path = None;
                 task.status = TaskStatus::Done;
                 task.updated_at = chrono::Utc::now();
@@ -6216,7 +6228,7 @@ impl App {
                 planning_session_agent.clone(),
                 planning_base_agent.clone(),
                 agent_switch,
-                task.cycle > 0,
+                task.session_agents.contains_key(&planning_agent),
                 skill_cmd,
                 skill_cmd_launch,
                 prompt,
@@ -6226,7 +6238,8 @@ impl App {
                 task.worktree_path.clone(),
                 plugin,
             );
-            task.session_agent = Some(planning_session_agent.clone());
+            task.session_agents
+                .insert(planning_agent.clone(), planning_session_agent.clone());
             task.agent = planning_agent;
             return Ok(false);
         }
@@ -6472,7 +6485,7 @@ impl App {
                 running_session_agent.clone(),
                 running_base_agent,
                 agent_switch,
-                task.cycle > 0,
+                task.session_agents.contains_key(&running_agent),
                 skill_cmd,
                 skill_cmd_launch,
                 prompt,
@@ -6482,7 +6495,8 @@ impl App {
                 task.worktree_path.clone(),
                 plugin,
             );
-            task.session_agent = Some(running_session_agent);
+            task.session_agents
+                .insert(running_agent.clone(), running_session_agent);
             task.agent = running_agent;
         }
         Ok(false)
@@ -6548,7 +6562,7 @@ impl App {
                 review_session_agent.clone(),
                 review_base_agent,
                 agent_switch,
-                task.cycle > 0,
+                task.session_agents.contains_key(&review_agent),
                 skill_cmd,
                 skill_cmd_launch,
                 prompt,
@@ -6559,7 +6573,8 @@ impl App {
                 plugin,
             );
         }
-        task.session_agent = Some(review_session_agent);
+        task.session_agents
+            .insert(review_agent.clone(), review_session_agent);
         task.agent = review_agent.clone();
 
         // PR already exists (task was resumed from Review) — push new changes
@@ -6650,7 +6665,7 @@ impl App {
         let branch_name = task.branch_name.clone();
         let agent = current_session_base_agent(task, &self.state.config);
         task.session_name = None;
-        task.session_agent = None;
+        task.session_agents.clear();
         task.worktree_path = None;
 
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
@@ -7586,7 +7601,7 @@ impl App {
                 running_session_agent.clone(),
                 running_base_agent.clone(),
                 agent_switch,
-                task.cycle > 0,
+                task.session_agents.contains_key(&agent_switch_agent),
                 skill_cmd,
                 skill_cmd_launch,
                 prompt,
@@ -7596,7 +7611,8 @@ impl App {
                 task.worktree_path.clone(),
                 plugin,
             );
-            task.session_agent = Some(running_session_agent.clone());
+            task.session_agents
+                .insert(agent_switch_agent.clone(), running_session_agent.clone());
             task.agent = agent_switch_agent;
             task.status = TaskStatus::Running;
             task.updated_at = chrono::Utc::now();
@@ -7739,6 +7755,7 @@ impl App {
                         return Ok(());
                     }
                 };
+                let running_has_session = task.session_agents.contains_key(&running_agent);
                 let running_session_agent =
                     session_agent_for_target(&self.state.config, &task, &running_agent);
                 deploy_agent_switch(
@@ -7752,38 +7769,48 @@ impl App {
 
                 mark_reviewed_point(&task);
 
-                // Switch agent if running phase uses a different agent than review
+                // Recover or switch to the destination with that instance's own launch definition.
                 let current_base_agent = current_session_base_agent(&task, &self.state.config);
-                if agent_switch {
-                    if let Some(session_name) = &task.session_name {
-                        let session_clone = session_name.clone();
-                        let hook_task_id = task.id.clone();
-                        let tmux_ops = Arc::clone(&self.state.tmux_ops);
-                        let agent_registry = Arc::clone(&self.state.agent_registry);
-                        let running_agent_clone = running_agent.clone();
-                        let current_base_agent_clone = current_base_agent.clone();
-                        let wt_path = task.worktree_path.clone();
-                        std::thread::spawn(move || {
-                            let agent_ops = agent_registry.get(&running_agent_clone);
-                            ensure_window_or_recover(
-                                tmux_ops.as_ref(),
-                                &session_clone,
-                                agent_ops.as_ref(),
-                                wt_path.as_deref(),
-                                &hook_task_id,
-                            );
-                            let new_cmd = agent_ops.build_resume_command();
+                if let Some(session_name) = &task.session_name {
+                    let session_clone = session_name.clone();
+                    let hook_task_id = task.id.clone();
+                    let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                    let agent_registry = Arc::clone(&self.state.agent_registry);
+                    let running_agent_clone = running_agent.clone();
+                    let running_session_agent_clone = running_session_agent.clone();
+                    let current_base_agent_clone = current_base_agent.clone();
+                    let wt_path = task.worktree_path.clone();
+                    std::thread::spawn(move || {
+                        let agent_ops = operations_for_session_agent(
+                            &running_agent_clone,
+                            &running_session_agent_clone,
+                            agent_registry.as_ref(),
+                        );
+                        let new_cmd = build_instance_launch_command(
+                            agent_ops.as_ref(),
+                            running_has_session,
+                            "",
+                        );
+                        let recovered = ensure_window_or_recover(
+                            tmux_ops.as_ref(),
+                            &session_clone,
+                            &new_cmd,
+                            wt_path.as_deref(),
+                            &hook_task_id,
+                        );
+                        if agent_switch && !recovered {
                             switch_agent_in_tmux(
                                 tmux_ops.as_ref(),
                                 &session_clone,
                                 &current_base_agent_clone,
                                 &new_cmd,
                             );
-                        });
-                    }
+                        }
+                    });
                 }
 
-                task.session_agent = Some(running_session_agent);
+                task.session_agents
+                    .insert(running_agent.clone(), running_session_agent);
 
                 task.agent = running_agent;
                 task.status = TaskStatus::Running;
@@ -7813,6 +7840,7 @@ impl App {
                     }
                 };
 
+                let planning_has_session = task.session_agents.contains_key(&planning_agent);
                 let planning_session_agent =
                     session_agent_for_target(&self.state.config, &task, &planning_agent);
                 let planning_base_agent = planning_session_agent.base_agent.clone();
@@ -7854,6 +7882,7 @@ impl App {
                     let tmux_ops = Arc::clone(&self.state.tmux_ops);
                     let agent_registry = Arc::clone(&self.state.agent_registry);
                     let planning_agent_clone = planning_agent.clone();
+                    let planning_session_agent_clone = planning_session_agent.clone();
                     let current_base_agent_clone = current_base_agent.clone();
                     let planning_base_agent_clone = planning_base_agent.clone();
                     let task_content_clone = task_content.clone();
@@ -7863,23 +7892,32 @@ impl App {
                     let wt_path = task.worktree_path.clone();
                     let auto_trust = self.state.config.auto_trust;
                     std::thread::spawn(move || {
-                        let agent_ops = agent_registry.get(&planning_agent_clone);
-                        // Recover window if it was lost
-                        ensure_window_or_recover(
+                        let agent_ops = operations_for_session_agent(
+                            &planning_agent_clone,
+                            &planning_session_agent_clone,
+                            agent_registry.as_ref(),
+                        );
+                        let new_cmd = build_instance_launch_command(
+                            agent_ops.as_ref(),
+                            planning_has_session,
+                            "",
+                        );
+                        let recovered = ensure_window_or_recover(
                             tmux_ops.as_ref(),
                             &session_clone,
-                            agent_ops.as_ref(),
+                            &new_cmd,
                             wt_path.as_deref(),
                             &hook_task_id,
                         );
-                        if agent_switch {
-                            let resume_cmd = agent_ops.build_resume_command();
+                        if agent_switch && !recovered {
                             switch_agent_in_tmux(
                                 tmux_ops.as_ref(),
                                 &session_clone,
                                 &current_base_agent_clone,
-                                &resume_cmd,
+                                &new_cmd,
                             );
+                        }
+                        if agent_switch || recovered {
                             let _ = wait_for_agent_ready(
                                 &tmux_ops,
                                 &session_clone,
@@ -7901,7 +7939,8 @@ impl App {
                     });
                 }
 
-                task.session_agent = Some(planning_session_agent);
+                task.session_agents
+                    .insert(planning_agent.clone(), planning_session_agent);
 
                 task.agent = planning_agent;
                 task.status = TaskStatus::Planning;
@@ -7930,6 +7969,7 @@ impl App {
                         return Ok(());
                     }
                 };
+                let planning_has_session = task.session_agents.contains_key(&planning_agent);
                 let planning_session_agent =
                     session_agent_for_target(&self.state.config, &task, &planning_agent);
                 deploy_agent_switch(
@@ -7941,36 +7981,46 @@ impl App {
                     self.state.config.agent_hooks,
                 )?;
                 let current_base_agent = current_session_base_agent(&task, &self.state.config);
-                if agent_switch {
-                    if let Some(session_name) = &task.session_name {
-                        let session_clone = session_name.clone();
-                        let hook_task_id = task.id.clone();
-                        let tmux_ops = Arc::clone(&self.state.tmux_ops);
-                        let agent_registry = Arc::clone(&self.state.agent_registry);
-                        let planning_agent_clone = planning_agent.clone();
-                        let current_base_agent_clone = current_base_agent.clone();
-                        let wt_path = task.worktree_path.clone();
-                        std::thread::spawn(move || {
-                            let agent_ops = agent_registry.get(&planning_agent_clone);
-                            ensure_window_or_recover(
-                                tmux_ops.as_ref(),
-                                &session_clone,
-                                agent_ops.as_ref(),
-                                wt_path.as_deref(),
-                                &hook_task_id,
-                            );
-                            let new_cmd = agent_ops.build_resume_command();
+                if let Some(session_name) = &task.session_name {
+                    let session_clone = session_name.clone();
+                    let hook_task_id = task.id.clone();
+                    let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                    let agent_registry = Arc::clone(&self.state.agent_registry);
+                    let planning_agent_clone = planning_agent.clone();
+                    let planning_session_agent_clone = planning_session_agent.clone();
+                    let current_base_agent_clone = current_base_agent.clone();
+                    let wt_path = task.worktree_path.clone();
+                    std::thread::spawn(move || {
+                        let agent_ops = operations_for_session_agent(
+                            &planning_agent_clone,
+                            &planning_session_agent_clone,
+                            agent_registry.as_ref(),
+                        );
+                        let new_cmd = build_instance_launch_command(
+                            agent_ops.as_ref(),
+                            planning_has_session,
+                            "",
+                        );
+                        let recovered = ensure_window_or_recover(
+                            tmux_ops.as_ref(),
+                            &session_clone,
+                            &new_cmd,
+                            wt_path.as_deref(),
+                            &hook_task_id,
+                        );
+                        if agent_switch && !recovered {
                             switch_agent_in_tmux(
                                 tmux_ops.as_ref(),
                                 &session_clone,
                                 &current_base_agent_clone,
                                 &new_cmd,
                             );
-                        });
-                    }
+                        }
+                    });
                 }
 
-                task.session_agent = Some(planning_session_agent);
+                task.session_agents
+                    .insert(planning_agent.clone(), planning_session_agent);
 
                 task.agent = planning_agent;
                 task.status = TaskStatus::Planning;
@@ -8441,7 +8491,7 @@ impl App {
                 review_session_agent.clone(),
                 review_base_agent,
                 agent_switch,
-                task.cycle > 0,
+                task.session_agents.contains_key(&review_agent),
                 skill_cmd,
                 skill_cmd_launch,
                 prompt,
@@ -8452,7 +8502,8 @@ impl App {
                 plugin,
             );
         }
-        task.session_agent = Some(review_session_agent);
+        task.session_agents
+            .insert(review_agent.clone(), review_session_agent);
         task.agent = review_agent;
         task.status = TaskStatus::Review;
         task.updated_at = chrono::Utc::now();
@@ -8582,14 +8633,14 @@ impl App {
         ensure_deployment_paths_safe(&project_path, &[&base_agent])?;
         if let Some(spec) = agent::spec(&base_agent).filter(|spec| spec.name == "omp") {
             exclude_agtx_files_from_git(&project_path);
-            write_mcp_config(spec, &project_path_str, &project_path_str, &agtx_bin);
+            write_mcp_config(spec, &project_path_str, &project_path_str, &agtx_bin)?;
         }
         deploy_skill(
             &project_path,
             "agtx-orchestrate",
             skills::ORCHESTRATE_SKILL,
             &base_agent,
-        );
+        )?;
         let agent_cmd = agent.build_orchestrator_command(&mcp_json_str, &agtx_bin);
 
         // Ensure project tmux session exists
@@ -8778,9 +8829,11 @@ impl App {
         if let Some(db) = &self.state.db {
             let mut tasks = db.get_all_tasks()?;
             for task in &mut tasks {
-                if task.session_name.is_some() && task.session_agent.is_none() {
-                    task.session_agent =
-                        Some(session_agent_for_instance(&self.state.config, &task.agent));
+                if task.session_name.is_some() && !task.session_agents.contains_key(&task.agent) {
+                    task.session_agents.insert(
+                        task.agent.clone(),
+                        session_agent_for_instance(&self.state.config, &task.agent),
+                    );
                     db.update_task(task)?;
                 }
             }
@@ -10034,6 +10087,40 @@ fn is_legacy_agtx_mcp_entry(entry: &serde_json::Value, project_root: &Path) -> b
         == expected
 }
 
+fn replace_file_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let mut attempt = 0_u8;
+    let (temp_path, mut temp_file) = loop {
+        let candidate = parent.join(format!(".{name}.agtx-{}-{attempt}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => break (candidate, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt < 9 => {
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+
+    let result = (|| {
+        std::io::Write::write_all(&mut temp_file, contents)?;
+        temp_file.sync_all()?;
+        drop(temp_file);
+        std::fs::rename(&temp_path, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
 fn migrate_obsolete_omp_mcp(worktree: &Path, project_root: &Path) -> bool {
     let path = worktree.join(".omp/mcp.json");
     if git::ensure_destination_path_safe(worktree, &path).is_err() {
@@ -10075,11 +10162,10 @@ fn migrate_obsolete_omp_mcp(worktree: &Path, project_root: &Path) -> bool {
     if root_obj.is_empty() {
         std::fs::remove_file(&path).is_ok()
     } else {
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&root).unwrap_or_default(),
-        )
-        .is_ok()
+        let Ok(serialized) = serde_json::to_vec_pretty(&root) else {
+            return false;
+        };
+        replace_file_atomically(&path, &serialized).is_ok()
     }
 }
 
@@ -12574,18 +12660,6 @@ fn resolve_skill_command(
     skills::transform_plugin_command(&expanded, base_agent_name)
 }
 
-/// OMP profiles own isolated persisted sessions, so returning to one should
-/// continue it even during the task's first workflow cycle. Other agents retain
-/// the existing cycle-gated resume behavior because a named registry alias does
-/// not necessarily isolate that CLI's session storage.
-fn should_resume_instance(
-    instance_name: &str,
-    base_agent_name: &str,
-    resume_on_switch: bool,
-) -> bool {
-    instance_name != base_agent_name && (resume_on_switch || base_agent_name == "omp")
-}
-
 fn deploy_agent_switch(
     task: &Task,
     project_path: &Path,
@@ -12623,7 +12697,7 @@ fn spawn_send_to_agent(
     target_session_agent: SessionAgent,
     target_base_agent: String,
     needs_switch: bool,
-    resume_on_switch: bool,
+    target_has_session: bool,
     skill_cmd: Option<String>,
     // The same command resolved **without** collapsing `{task}`, for the argv
     // path. An agent switch starts a new process, so it takes the message in argv
@@ -12643,41 +12717,36 @@ fn spawn_send_to_agent(
             &target_session_agent,
             agent_registry.as_ref(),
         );
-        // If the tmux window is gone, recover it with the persisted target session.
-        ensure_window_or_recover(
+        // A missing pane is a launch of the destination, not a reason to resume
+        // whichever conversation the CLI considers "latest". The same persisted
+        // presence check controls both recovery and an ordinary phase switch.
+        let needs_launch = needs_switch || !tmux_ops.window_exists(&target).unwrap_or(true);
+        let resume_target = target_has_session;
+        let launch_text = compose_launch_text(skill_cmd_launch.as_deref(), &prompt);
+        let delivered_at_launch = needs_launch
+            && !resume_target
+            && agent::spec::can_launch_with_prompt(agent_ops.prompt_injection(), &launch_text);
+        let opening_message = if delivered_at_launch {
+            &launch_text
+        } else {
+            ""
+        };
+        let new_cmd =
+            build_instance_launch_command(agent_ops.as_ref(), resume_target, opening_message);
+        let recovered = ensure_window_or_recover(
             tmux_ops.as_ref(),
             &target,
-            agent_ops.as_ref(),
+            &new_cmd,
             worktree_path.as_deref(),
             &task_id,
         );
 
-        let mut delivered_at_launch = false;
-        if needs_switch {
-            // A named instance owns a distinct persisted conversation. Always ask
-            // it to continue when switching back: OMP starts a fresh session when
-            // the profile has no prior session for this worktree, and resumes the
-            // right one even when the return happens within the first task cycle.
-            let resume_target =
-                should_resume_instance(&target_agent, &target_base_agent, resume_on_switch);
-            let launch_text = compose_launch_text(skill_cmd_launch.as_deref(), &prompt);
-            delivered_at_launch = !resume_target
-                && agent::spec::can_launch_with_prompt(agent_ops.prompt_injection(), &launch_text);
-            let new_cmd = if resume_target {
-                agent_ops.build_resume_command()
-            } else {
-                agent_ops.build_interactive_command(if delivered_at_launch {
-                    &launch_text
-                } else {
-                    ""
-                })
-            };
+        if needs_switch && !recovered {
             switch_agent_in_tmux(tmux_ops.as_ref(), &target, &current_base_agent, &new_cmd);
-            if !delivered_at_launch {
-                // The *new* agent is what has to become ready.
-                let _ =
-                    wait_for_agent_ready(&tmux_ops, &target, Some(&target_base_agent), auto_trust);
-            }
+        }
+        if needs_launch && !delivered_at_launch {
+            // The destination agent is what has to become ready.
+            let _ = wait_for_agent_ready(&tmux_ops, &target, Some(&target_base_agent), auto_trust);
         }
         if !delivered_at_launch {
             let clear_context = plugin
@@ -13392,11 +13461,20 @@ fn glob_path_exists(pattern: &str) -> bool {
 /// not to the global default, and not to whichever override ran last, which is
 /// what `Task::agent` holds by then.
 fn phase_agent<'a>(config: &'a MergedConfig, task: &'a Task, phase: &str) -> &'a str {
-    let requested = config
-        .explicit_agent_for_phase(phase)
-        .or(task.base_agent.as_deref().filter(|a| !a.is_empty()))
-        .unwrap_or(&config.default_agent);
-    config.resolve_agent_name(requested)
+    for requested in [
+        config.explicit_agent_for_phase(phase),
+        task.base_agent.as_deref().filter(|agent| !agent.is_empty()),
+        Some(config.default_agent.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let resolved = config.resolve_agent_name(requested);
+        if resolved == requested {
+            return resolved;
+        }
+    }
+    config.resolve_agent_name(&config.default_agent)
 }
 
 /// Determine the target agent for a phase and whether a switch is needed.
@@ -13597,31 +13675,35 @@ fn is_agent_active(
 fn ensure_window_or_recover(
     tmux_ops: &dyn TmuxOperations,
     target: &str,
-    agent_ops: &dyn AgentOperations,
+    launch_command: &str,
     worktree_path: Option<&str>,
     task_id: &str,
-) {
-    if !tmux_ops.window_exists(target).unwrap_or(true) {
-        let Some(wt_path) = worktree_path else { return };
-        if !Path::new(wt_path).exists() {
-            return;
-        }
-        let Some((session, window)) = target.split_once(':') else {
-            return;
-        };
-        if !tmux_ops.has_session(session) {
-            let _ = tmux_ops.create_session(session, wt_path);
-        }
-        let resume_cmd = agent_ops.build_resume_command();
-        let _ = tmux_ops.create_window(
+) -> bool {
+    if tmux_ops.window_exists(target).unwrap_or(true) {
+        return false;
+    }
+    let Some(wt_path) = worktree_path else {
+        return false;
+    };
+    if !Path::new(wt_path).exists() {
+        return false;
+    }
+    let Some((session, window)) = target.split_once(':') else {
+        return false;
+    };
+    if !tmux_ops.has_session(session) && tmux_ops.create_session(session, wt_path).is_err() {
+        return false;
+    }
+    tmux_ops
+        .create_window(
             session,
             window,
             wt_path,
-            Some(resume_cmd),
+            Some(launch_command.to_string()),
             true,
             &agtx_task_env(task_id, wt_path),
-        );
-    }
+        )
+        .is_ok()
 }
 
 /// Gracefully switch the agent running in a tmux window.
@@ -14548,112 +14630,96 @@ fn write_skills_to_worktree(
     agent_hooks: bool,
 ) -> Result<()> {
     let worktree = Path::new(worktree_path);
+
+    // Invalidate a previous successful deployment before changing anything.
+    // A failed redeploy must never leave a stale marker claiming the current
+    // binary and generated files were installed successfully.
+    let deploy_marker = worktree.join(DEPLOY_MARKER);
+    git::ensure_destination_path_safe(worktree, &deploy_marker)?;
+    match std::fs::remove_file(&deploy_marker) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
     ensure_deployment_paths_safe(worktree, base_agent_names)?;
     exclude_agtx_files_from_git(worktree);
 
-    // Replay the project's existing trust onto this worktree, for the one agent
-    // that needs it. Antigravity matches trusted paths **exactly** — no ancestor
-    // inheritance at any depth — so a user who already trusted the project would
-    // otherwise face a fresh prompt for every task.
-    //
-    // This is the right call site for both paths: worktree creation *and* an agent
-    // switch land here, and with a multi-agent config the switched-in agent sees
-    // the worktree for the first time at switch time, not at creation.
-    //
-    // It never grants trust that does not already exist — `seed_from_project` is a
-    // no-op unless the project root is in the agent's own store. See
-    // `agent::trust`.
+    // Replay existing trust, but never manufacture it. A failed trust-store write
+    // is a failed deployment: launching afterward would park the agent on a prompt
+    // despite agtx having reported setup complete.
     if let Some(home) = agent_trust_home() {
         for agent_name in base_agent_names {
-            if !agent::trust::needs_seeding(agent_name) {
-                continue;
+            if agent::trust::needs_seeding(agent_name) {
+                agent::trust::seed_from_project(agent_name, project_path, worktree, &home)?;
             }
-            let _ = agent::trust::seed_from_project(
-                agent_name,
-                project_path,
-                Path::new(worktree_path),
-                &home,
-            );
         }
     }
 
-    let agtx_dir = Path::new(worktree_path).join(".agtx");
-    let _ = std::fs::create_dir_all(&agtx_dir);
-
-    // Write canonical .agtx/skills/ directory
+    let agtx_dir = worktree.join(".agtx");
+    std::fs::create_dir_all(&agtx_dir)?;
     let skills_dir = agtx_dir.join("skills");
-    if let Some(ref p) = plugin {
-        // Copy skills from plugin directory, falling back to built-in defaults
-        if let Some(plugin_dir) = WorkflowPlugin::plugin_dir(&p.name, Some(project_path)) {
-            for (skill_name, default_content) in skills::BUILTIN_SKILLS {
-                let src = plugin_dir.join(skill_name).join("SKILL.md");
-                let dst_dir = skills_dir.join(skill_name);
-                let _ = std::fs::create_dir_all(&dst_dir);
-                if src.exists() {
-                    let _ = std::fs::copy(&src, dst_dir.join("SKILL.md"));
-                } else {
-                    let _ = std::fs::write(dst_dir.join("SKILL.md"), default_content);
-                }
+
+    // Canonical copies are the source of truth for every native layout.
+    for (skill_name, default_content) in skills::BUILTIN_SKILLS {
+        let skill_dir = skills_dir.join(skill_name);
+        std::fs::create_dir_all(&skill_dir)?;
+        let destination = skill_dir.join("SKILL.md");
+        if let Some(plugin_dir) = plugin
+            .as_ref()
+            .and_then(|p| WorkflowPlugin::plugin_dir(&p.name, Some(project_path)))
+        {
+            let source = plugin_dir.join(skill_name).join("SKILL.md");
+            if source.exists() {
+                std::fs::copy(&source, &destination).with_context(|| {
+                    format!(
+                        "failed to deploy skill '{}' from '{}'",
+                        skill_name,
+                        source.display()
+                    )
+                })?;
+            } else {
+                std::fs::write(&destination, default_content)?;
             }
         } else {
-            // Plugin dir not found, write defaults
-            for (skill_name, skill_content) in skills::BUILTIN_SKILLS {
-                let skill_dir = skills_dir.join(skill_name);
-                let _ = std::fs::create_dir_all(&skill_dir);
-                let _ = std::fs::write(skill_dir.join("SKILL.md"), skill_content);
-            }
-        }
-    } else {
-        // Write built-in default skills
-        for (skill_name, skill_content) in skills::BUILTIN_SKILLS {
-            let skill_dir = skills_dir.join(skill_name);
-            let _ = std::fs::create_dir_all(&skill_dir);
-            let _ = std::fs::write(skill_dir.join("SKILL.md"), skill_content);
+            std::fs::write(&destination, default_content)?;
         }
     }
 
-    // Write project-scoped MCP server config for each configured agent.
-    // Use the project root path (not the worktree path) so the MCP server opens
-    // the correct project DB where tasks are stored.
     let agtx_bin = std::env::current_exe()
         .unwrap_or_else(|_| std::path::PathBuf::from("agtx"))
         .to_string_lossy()
         .to_string();
     let project_path_str = project_path.to_string_lossy().to_string();
-    // Marker for the startup drift check; see DEPLOY_MARKER.
-    let _ = std::fs::write(Path::new(worktree_path).join(DEPLOY_MARKER), &agtx_bin);
     for agent_name in base_agent_names {
         if let Some(spec) = agent::spec(agent_name) {
-            write_mcp_config(spec, worktree_path, &project_path_str, &agtx_bin);
-            // After the MCP writer, never before: two agents keep their hooks in
-            // the same file as their MCP config, and both writers
-            // read-modify-write it. Called even when hooks are off, so a worktree
-            // deployed with them on gets them removed rather than left firing.
-            write_hook_config(spec, worktree_path, &agtx_bin, agent_hooks);
+            write_mcp_config(spec, worktree_path, &project_path_str, &agtx_bin)?;
+            // MCP and hooks can share a file, so preserve this order.
+            write_hook_config(spec, worktree_path, &agtx_bin, agent_hooks)?;
         }
     }
 
-    // Write to agent-native discovery paths (e.g. .claude/commands/agtx/)
-    // Deploy for all configured agents so skills are available across phase transitions
     for agent_name in base_agent_names {
         let Some(spec) = agent::spec(agent_name) else {
             continue;
         };
         if let Some((base_dir, namespace)) = spec.skill_dir {
             let native_dir = if namespace.is_empty() {
-                Path::new(worktree_path).join(base_dir)
+                worktree.join(base_dir)
             } else {
-                Path::new(worktree_path).join(base_dir).join(namespace)
+                worktree.join(base_dir).join(namespace)
             };
-            let _ = std::fs::create_dir_all(&native_dir);
-
-            for (skill_dir_name, default_content) in skills::BUILTIN_SKILLS {
+            std::fs::create_dir_all(&native_dir)?;
+            for (skill_name, default_content) in skills::BUILTIN_SKILLS {
                 let content =
-                    resolve_skill_content(plugin, skill_dir_name, project_path, default_content);
-                write_skill_file(spec, skill_dir_name, &content, &native_dir);
+                    resolve_skill_content(plugin, skill_name, project_path, default_content);
+                write_skill_file(spec, skill_name, &content, &native_dir)?;
             }
         }
     }
+
+    // Commit marker: only a fully successful deployment is considered current.
+    std::fs::write(worktree.join(DEPLOY_MARKER), &agtx_bin)?;
     Ok(())
 }
 
@@ -14668,9 +14734,14 @@ fn write_skills_to_worktree(
 ///
 /// The writers whose file is shared with an MCP config, or may be committed,
 /// merge; the rest own their file and are written outright.
-fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &str, enabled: bool) {
+fn write_hook_config(
+    spec: &agent::AgentSpec,
+    worktree_path: &str,
+    agtx_bin: &str,
+    enabled: bool,
+) -> Result<()> {
     let Some(kind) = spec.hook_config else {
-        return;
+        return Ok(());
     };
     let wt = Path::new(worktree_path);
     // When hooks are off this is an *empty* set of handlers under the same event
@@ -14687,12 +14758,12 @@ fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &st
         // Shares `.claude/settings.local.json` with the MCP preflight keys
         // `write_mcp_config` just wrote.
         agent::HookConfigKind::ClaudeSettings => {
-            merge_hooks_into_json_settings(&wt.join(".claude").join("settings.local.json"), ours);
+            merge_hooks_into_json_settings(&wt.join(".claude").join("settings.local.json"), ours)?;
         }
         // Same shape; `.gemini/settings.json` also carries `mcpServers` and
         // `trust: true`.
         agent::HookConfigKind::GeminiSettings => {
-            merge_hooks_into_json_settings(&wt.join(".gemini").join("settings.json"), ours);
+            merge_hooks_into_json_settings(&wt.join(".gemini").join("settings.json"), ours)?;
         }
         // `.codex/hooks.json` is auto-discovered — no pointer in
         // `.codex/config.toml`, whose `hooks` key is a table, not a path;
@@ -14702,7 +14773,7 @@ fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &st
         // optional `description`. codex-cli 0.144.5.
         agent::HookConfigKind::CodexHooksJson => {
             let dir = wt.join(".codex");
-            let _ = std::fs::create_dir_all(&dir);
+            std::fs::create_dir_all(&dir)?;
             let path = dir.join("hooks.json");
             let mut root = read_json_object(&path);
             let mut hooks = root
@@ -14717,7 +14788,7 @@ fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &st
                     .or_insert_with(|| serde_json::json!("agtx phase status"));
                 root.insert("hooks".to_string(), serde_json::Value::Object(hooks));
             }
-            write_json(&path, &serde_json::Value::Object(root));
+            write_json(&path, &serde_json::Value::Object(root))?;
         }
         // `{version, hooks: {event: [{command}]}}`. The one agent that does not
         // take the Claude-shaped `{hooks: [{type, command}]}` wrapper — its
@@ -14741,7 +14812,7 @@ fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &st
             // task branch for the agent to commit. `.cursor` is not in
             // AGENT_CONFIG_DIRS either, so the diff view would not hide it.
             let dir = wt.join(".cursor");
-            let _ = std::fs::create_dir_all(&dir);
+            std::fs::create_dir_all(&dir)?;
             let path = dir.join("hooks.json");
             let mut root = read_json_object(&path);
             let mut hooks = root
@@ -14755,23 +14826,23 @@ fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &st
                 root.insert("version".to_string(), serde_json::json!(1));
                 root.insert("hooks".to_string(), serde_json::Value::Object(hooks));
             }
-            write_json(&path, &serde_json::Value::Object(root));
+            write_json(&path, &serde_json::Value::Object(root))?;
         }
         // Grok scans the directory, so agtx owns one file in it and never merges.
         agent::HookConfigKind::GrokHooksJson => {
             let dir = wt.join(".grok").join("hooks");
-            let _ = std::fs::create_dir_all(&dir);
+            std::fs::create_dir_all(&dir)?;
             write_json(
                 &dir.join("agtx.json"),
                 &serde_json::json!({ "hooks": ours }),
-            );
+            )?;
         }
         // Keyed by hook *name* first, event second; every handler carries its own
         // `--event` because the payload has no event name. `.agents/` is
         // vendor-neutral and may be committed, so this merges.
         agent::HookConfigKind::AntigravityHooksJson => {
             let dir = wt.join(".agents");
-            let _ = std::fs::create_dir_all(&dir);
+            std::fs::create_dir_all(&dir)?;
             let path = dir.join("hooks.json");
             let mut root = read_json_object(&path);
             // Keyed by hook name, so agtx owns one key and pruning is a removal
@@ -14784,9 +14855,10 @@ fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &st
             } else {
                 root.remove(AGTX_HOOK_NAME);
             }
-            write_json(&path, &serde_json::Value::Object(root));
+            write_json(&path, &serde_json::Value::Object(root))?;
         }
     }
+    Ok(())
 }
 
 /// The same event keys with no handlers, which `merge_hook_events` prunes.
@@ -14844,21 +14916,19 @@ fn read_json_object(path: &Path) -> serde_json::Map<String, serde_json::Value> {
         .unwrap_or_default()
 }
 
-fn write_json(path: &Path, value: &serde_json::Value) {
-    let _ = std::fs::write(
-        path,
-        serde_json::to_string_pretty(value).unwrap_or_default(),
-    );
+fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
+    std::fs::write(path, serde_json::to_string_pretty(value)?)?;
+    Ok(())
 }
 
 /// Merge agtx's hooks into a settings file it shares with other keys.
-fn merge_hooks_into_json_settings(path: &Path, ours: serde_json::Value) {
+fn merge_hooks_into_json_settings(path: &Path, ours: serde_json::Value) -> Result<()> {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
     let mut settings = read_json_object(path);
     merge_claude_hooks(&mut settings, ours);
-    write_json(path, &serde_json::Value::Object(settings));
+    write_json(path, &serde_json::Value::Object(settings))
 }
 
 /// Insert agtx's entry into a `mcpServers` JSON file without disturbing the rest.
@@ -14869,8 +14939,13 @@ fn merge_hooks_into_json_settings(path: &Path, ours: serde_json::Value) {
 /// top-level keys — have to survive. A missing or unparseable file starts from an
 /// empty object rather than failing, on the same best-effort footing as the rest
 /// of worktree setup.
-fn merge_mcp_servers_json(dir: &Path, filename: &str, agtx_bin: &str, project_path_str: &str) {
-    let _ = std::fs::create_dir_all(dir);
+fn merge_mcp_servers_json(
+    dir: &Path,
+    filename: &str,
+    agtx_bin: &str,
+    project_path_str: &str,
+) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
     let path = dir.join(filename);
     let mut root = std::fs::read_to_string(&path)
         .ok()
@@ -14884,10 +14959,8 @@ fn merge_mcp_servers_json(dir: &Path, filename: &str, agtx_bin: &str, project_pa
         "command": agtx_bin,
         "args": ["mcp-serve", project_path_str]
     });
-    let _ = std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&root).unwrap_or_default(),
-    );
+    std::fs::write(&path, serde_json::to_string_pretty(&root)?)?;
+    Ok(())
 }
 
 /// Write the project-scoped MCP server config for one agent into its worktree.
@@ -14906,9 +14979,9 @@ fn write_mcp_config(
     worktree_path: &str,
     project_path_str: &str,
     agtx_bin: &str,
-) {
+) -> Result<()> {
     let Some(kind) = spec.mcp_config else {
-        return;
+        return Ok(());
     };
     match kind {
         agent::McpConfigKind::ClaudeJson => {
@@ -14917,17 +14990,17 @@ fn write_mcp_config(
                     "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str] }
                 }
             });
-            let _ = std::fs::write(
+            std::fs::write(
                 Path::new(worktree_path).join(".mcp.json"),
-                serde_json::to_string_pretty(&cfg).unwrap_or_default(),
-            );
+                serde_json::to_string_pretty(&cfg)?,
+            )?;
             // Merge into any existing settings rather than replacing them:
             // `.claude` is in AGENT_CONFIG_DIRS, so a project that ships its own
             // settings.local.json has it copied into every worktree, and a plain
             // write would silently drop the user's permissions/env/hooks.
             // Same merge-don't-overwrite rule the grok and antigravity writers follow.
             let claude_dir = Path::new(worktree_path).join(".claude");
-            let _ = std::fs::create_dir_all(&claude_dir);
+            std::fs::create_dir_all(&claude_dir)?;
             let settings_path = claude_dir.join("settings.local.json");
             let mut settings = std::fs::read_to_string(&settings_path)
                 .ok()
@@ -14956,10 +15029,7 @@ fn write_mcp_config(
                     serde_json::json!(true),
                 );
             }
-            let _ = std::fs::write(
-                &settings_path,
-                serde_json::to_string_pretty(&settings).unwrap_or_default(),
-            );
+            std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
         }
         agent::McpConfigKind::CodexToml => {
             let toml = format!(
@@ -14967,8 +15037,8 @@ fn write_mcp_config(
                 agtx_bin, project_path_str
             );
             let dir = Path::new(worktree_path).join(".codex");
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(dir.join("config.toml"), toml);
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(dir.join("config.toml"), toml)?;
 
             // No `[projects."<worktree>"] trust_level = "trusted"` entry is
             // written into the user's global ~/.codex/config.toml. Measured
@@ -14990,7 +15060,7 @@ fn write_mcp_config(
             // worktree, and a plain write drops the user's theme, model and any
             // `mcpServers` besides agtx. Same rule as the Claude writer above.
             let dir = Path::new(worktree_path).join(".gemini");
-            let _ = std::fs::create_dir_all(&dir);
+            std::fs::create_dir_all(&dir)?;
             let path = dir.join("settings.json");
             let mut settings = read_json_object(&path);
             let mut servers = settings
@@ -15006,7 +15076,7 @@ fn write_mcp_config(
                 }),
             );
             settings.insert("mcpServers".to_string(), serde_json::Value::Object(servers));
-            write_json(&path, &serde_json::Value::Object(settings));
+            write_json(&path, &serde_json::Value::Object(settings))?;
         }
         agent::McpConfigKind::CursorJson => {
             let cfg = serde_json::json!({
@@ -15015,11 +15085,8 @@ fn write_mcp_config(
                 }
             });
             let dir = Path::new(worktree_path).join(".cursor");
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(
-                dir.join("mcp.json"),
-                serde_json::to_string_pretty(&cfg).unwrap_or_default(),
-            );
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(dir.join("mcp.json"), serde_json::to_string_pretty(&cfg)?)?;
         }
         agent::McpConfigKind::GrokTomlMerge => {
             // Grok reads project-scoped MCP servers from .grok/config.toml (TOML, not JSON),
@@ -15031,7 +15098,7 @@ fn write_mcp_config(
                 esc(&project_path_str)
             );
             let dir = Path::new(worktree_path).join(".grok");
-            let _ = std::fs::create_dir_all(&dir);
+            std::fs::create_dir_all(&dir)?;
             // A repo may already ship a .grok/config.toml — append the agtx table
             // instead of clobbering the project's own settings.
             let path = dir.join("config.toml");
@@ -15042,7 +15109,7 @@ fn write_mcp_config(
                 } else {
                     format!("{}\n\n{}", existing.trim_end(), cfg)
                 };
-                let _ = std::fs::write(&path, merged);
+                std::fs::write(&path, merged)?;
             }
         }
         agent::McpConfigKind::AntigravityJsonMerge => {
@@ -15055,7 +15122,7 @@ fn write_mcp_config(
                 "mcp_config.json",
                 &agtx_bin,
                 &project_path_str,
-            );
+            )?;
         }
         agent::McpConfigKind::PiJsonMerge => {
             // pi itself has no MCP client; the `pi-mcp-adapter` package provides
@@ -15068,21 +15135,21 @@ fn write_mcp_config(
                 "mcp.json",
                 &agtx_bin,
                 &project_path_str,
-            );
+            )?;
         }
         agent::McpConfigKind::OmpPlugin => {
             // OMP can load an explicit Agent Plugin. Keeping agtx's generated MCP
             // definition under the gitignored .agtx directory avoids modifying a
             // project's tracked .omp/mcp.json on every task branch.
             let dir = Path::new(worktree_path).join(".agtx/omp-plugin");
-            let _ = std::fs::create_dir_all(&dir);
+            std::fs::create_dir_all(&dir)?;
             write_json(
                 &dir.join("plugin.json"),
                 &serde_json::json!({
                     "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
                     "name": "agtx"
                 }),
-            );
+            )?;
             write_json(
                 &dir.join("mcp.json"),
                 &serde_json::json!({
@@ -15095,7 +15162,7 @@ fn write_mcp_config(
                         }
                     }
                 }),
-            );
+            )?;
         }
         agent::McpConfigKind::OpenCode => {
             let cfg = serde_json::json!({
@@ -15106,12 +15173,13 @@ fn write_mcp_config(
                     }
                 }
             });
-            let _ = std::fs::write(
+            std::fs::write(
                 Path::new(worktree_path).join("opencode.json"),
-                serde_json::to_string_pretty(&cfg).unwrap_or_default(),
-            );
+                serde_json::to_string_pretty(&cfg)?,
+            )?;
         }
     }
+    Ok(())
 }
 
 /// Write one skill into an agent's native discovery directory, in that agent's
@@ -15126,44 +15194,55 @@ fn write_mcp_config(
 /// and had already drifted: the latter treated Claude's format as its `_`
 /// fallback, so a future agent with a skill dir but no arm would silently get
 /// Claude's `.md` layout from one and nothing from the other.
-fn write_skill_file(spec: &agent::AgentSpec, skill_name: &str, content: &str, native_dir: &Path) {
+fn write_skill_file(
+    spec: &agent::AgentSpec,
+    skill_name: &str,
+    content: &str,
+    native_dir: &Path,
+) -> Result<()> {
     match spec.skill_layout {
         agent::SkillLayout::CommandFile => {
             let transformed = transform_skill_frontmatter(content);
             let filename = skills::skill_dir_to_filename(skill_name, spec.name);
-            let _ = std::fs::write(native_dir.join(&filename), transformed);
+            std::fs::write(native_dir.join(&filename), transformed)?;
         }
         agent::SkillLayout::GeminiToml => {
             let description = skills::extract_description(content)
                 .unwrap_or_else(|| format!("agtx {} skill", skill_name));
             let toml_content = skills::skill_to_gemini_toml(&description, content);
             let filename = skills::skill_dir_to_filename(skill_name, spec.name);
-            let _ = std::fs::write(native_dir.join(&filename), toml_content);
+            std::fs::write(native_dir.join(&filename), toml_content)?;
         }
         agent::SkillLayout::SkillDir => {
             let skill_subdir = native_dir.join(skill_name);
-            let _ = std::fs::create_dir_all(&skill_subdir);
-            let _ = std::fs::write(skill_subdir.join("SKILL.md"), content);
+            std::fs::create_dir_all(&skill_subdir)?;
+            std::fs::write(skill_subdir.join("SKILL.md"), content)?;
         }
         agent::SkillLayout::OpenCodeFlat => {
             let oc_content = transform_skill_for_opencode(content);
             let filename = skills::skill_dir_to_filename(skill_name, spec.name);
-            let _ = std::fs::write(native_dir.join(&filename), oc_content);
+            std::fs::write(native_dir.join(&filename), oc_content)?;
         }
     }
+    Ok(())
 }
 
 /// Deploy a single skill to a target directory for the given agent.
 /// Writes both the canonical `.agtx/skills/` copy and the agent-native discovery path.
-fn deploy_skill(target_dir: &Path, skill_name: &str, content: &str, base_agent_name: &str) {
+fn deploy_skill(
+    target_dir: &Path,
+    skill_name: &str,
+    content: &str,
+    base_agent_name: &str,
+) -> Result<()> {
     // Write canonical copy
     let canonical_dir = target_dir.join(".agtx/skills").join(skill_name);
-    let _ = std::fs::create_dir_all(&canonical_dir);
-    let _ = std::fs::write(canonical_dir.join("SKILL.md"), content);
+    std::fs::create_dir_all(&canonical_dir)?;
+    std::fs::write(canonical_dir.join("SKILL.md"), content)?;
 
     // Write to agent-native discovery path
     let Some(spec) = agent::spec(base_agent_name) else {
-        return;
+        return Ok(());
     };
     if let Some((base_dir, namespace)) = spec.skill_dir {
         let native_dir = if namespace.is_empty() {
@@ -15171,9 +15250,10 @@ fn deploy_skill(target_dir: &Path, skill_name: &str, content: &str, base_agent_n
         } else {
             target_dir.join(base_dir).join(namespace)
         };
-        let _ = std::fs::create_dir_all(&native_dir);
-        write_skill_file(spec, skill_name, content, &native_dir);
+        std::fs::create_dir_all(&native_dir)?;
+        write_skill_file(spec, skill_name, content, &native_dir)?;
     }
+    Ok(())
 }
 
 /// Transform YAML frontmatter `name: agtx-plan` → `name: agtx:plan` for agent commands

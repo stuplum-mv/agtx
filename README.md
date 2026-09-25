@@ -146,10 +146,11 @@ agtx --version
 
 Press `o` to create a new task. The wizard guides you through:
 1. **Title** — enter a short task name
-2. **Plugin** — select a workflow plugin (auto-skipped if only one option)
-3. **Prompt** — write a detailed task description with inline references
+2. **Agent** — select the task's fallback agent or named instance (auto-skipped if only one is available)
+3. **Plugin** — select a compatible workflow plugin (auto-skipped if only one option)
+4. **Prompt** — write a detailed task description with inline references
 
-The agent is configured at the project level via `config.toml` (not per-task).
+The selected agent is used for phases without an explicit `[agents]` override.
 
 </details>
 
@@ -171,8 +172,8 @@ When writing a task description, you can reference files, skills, and other task
 
 Each task runs in its own tmux window with a dedicated coding agent. The session persists across the entire task lifecycle — you can open the task popup at any time to see live agent output, or press `Ctrl+f` to open it fullscreen inside agtx.
 
-- **Persistent context**: The agent's full conversation history is preserved across Planning → Running → Review
-- **Resume from Review**: Moving a task back to Running simply reconnects to the existing session — no re-initialization needed
+- **Persistent context**: Conversation history is retained separately for every agent instance used by the task
+- **Resume on return**: The first visit to an instance starts fresh; switching away and later returning resumes that instance's session (including plain built-in agents)
 - **Inline view**: Press `↩` on any active task to open a scrollable tmux view inside the TUI
 - **Fullscreen**: Press `Ctrl+f` to expand the task popup inside agtx. Press `Ctrl+f` again for windowed mode or `Ctrl+q` to return to the board.
 - **Auto merge-conflict resolution**: When a Review task becomes idle, agtx checks for merge conflicts with the default branch using a non-destructive virtual merge (`git merge-tree`). If conflicts are detected, the agent is automatically sent the `/agtx:merge-conflicts` skill to resolve them and re-commit
@@ -614,20 +615,53 @@ review = "codex"
 running = "codex"
 ```
 
-### Oh My Pi (OMP) profiles and models
+### Named agent instances
 
-Install and authenticate OMP first:
+A named instance gives one supported base agent another configuration identity. Named instances can
+be selected in the task wizard, used as `default_agent`, or assigned to a phase. Resolution order is:
+
+1. the phase's explicit `[agents]` value,
+2. the instance selected in the task wizard,
+3. `default_agent`.
+
+The first visit to an instance starts a fresh session. agtx stores session identity per instance, so
+switching `A → B → A` resumes A with the same base agent, profile, and model it originally used—even
+if configuration was reloaded in the meantime. Existing string values such as
+`running = "codex"` remain valid.
+
+```toml
+default_agent = "claude"
+
+[agents]
+review = "omp-review"
+
+[agent_profiles.omp-review]
+agent = "omp"
+profile = "agtx-review"  # optional; supported by the OMP adapter
+model = "cursor/gpt-5.6-sol:high"  # optional; use a value from `omp --list-models`
+```
+
+The schema is agent-neutral: instances without adapter-specific settings can also provide multiple
+names for the same base agent. OMP is the first adapter that additionally maps `profile` and `model`
+to CLI flags.
+
+#### Oh My Pi (OMP) setup
+
+OMP is a separate agent from Earendil Pi (`pi`). Install it using an
+[upstream-supported method](https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent); the command
+below requires Bun:
 
 ```bash
 bun install --global @oh-my-pi/pi-coding-agent
+omp --list-models
 omp
 ```
 
-OMP is a separate agent from Earendil Pi (`pi`). A named agent profile gives an
-OMP instance its own agtx name and can add an OMP `--profile` and/or `--model`.
-Because OMP profiles isolate authentication as well as sessions, initialize each named
-profile with `omp --profile <name>` unless its provider credentials come from the
-environment. To use one OMP model for every phase:
+Initialize each named OMP profile with `omp --profile <name>` unless its provider credentials come
+from the environment. Models under the `cursor/...` provider also require working Cursor
+credentials; choose another provider from `omp --list-models` otherwise.
+
+To use one OMP instance for every phase:
 
 ```toml
 default_agent = "omp-default"
@@ -637,7 +671,8 @@ agent = "omp"
 model = "cursor/gpt-5.6-sol:high"
 ```
 
-To select a different OMP profile or model per phase:
+To use separate profiles and models per phase, replace the illustrative model values below with
+entries reported by your `omp --list-models`:
 
 ```toml
 default_agent = "omp-default"
@@ -654,29 +689,26 @@ agent = "omp"
 [agent_profiles.omp-research]
 agent = "omp"
 profile = "agtx-research"
-model = "cursor/gpt-5.6-sol:high"
+model = "cursor/<research-model-from-omp-list-models>"
 
 [agent_profiles.omp-planning]
 agent = "omp"
 profile = "agtx-planning"
-model = "cursor/gpt-5.6-sol:high"
+model = "cursor/<planning-model-from-omp-list-models>"
 
 [agent_profiles.omp-running]
 agent = "omp"
 profile = "agtx-running"
-model = "cursor/gpt-5.6-sol:high"
+model = "cursor/<running-model-from-omp-list-models>"
 
 [agent_profiles.omp-review]
 agent = "omp"
 profile = "agtx-review"
-model = "cursor/gpt-5.6-sol:high"
+model = "cursor/<review-model-from-omp-list-models>"
 ```
 
-Use a distinct OMP `profile` when phases need separate conversation histories.
-On returning to that phase, agtx launches the named instance with
-`--profile … --continue`, so OMP resumes that profile's session in the task
-worktree. Project-level `agent_profiles` override same-named global profiles;
-ordinary string values in `[agents]` remain supported.
+Global and project `agent_profiles` are merged by name; a project definition replaces a same-named
+global definition.
 
 ## Plugins
 

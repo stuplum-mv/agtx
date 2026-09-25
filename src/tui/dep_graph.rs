@@ -222,7 +222,7 @@ mod tests {
             base_agent: Some("claude".to_string()),
             project_id: "proj".to_string(),
             session_name: None,
-            session_agent: None,
+            session_agents: Default::default(),
             worktree_path: None,
             branch_name: None,
             pr_number: None,

@@ -307,7 +307,7 @@ fn test_create_pr_with_content_success() {
         agent: "claude".to_string(),
         base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
-        session_agent: None,
+        session_agents: Default::default(),
         session_name: Some("test-session".to_string()),
         worktree_path: Some("/tmp/worktree".to_string()),
         branch_name: Some("feature/test".to_string()),
@@ -409,7 +409,7 @@ fn test_create_pr_with_content_no_changes() {
         agent: "claude".to_string(),
         base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
-        session_agent: None,
+        session_agents: Default::default(),
         session_name: Some("test-session".to_string()),
         worktree_path: Some("/tmp/worktree".to_string()),
         branch_name: Some("feature/test".to_string()),
@@ -470,7 +470,7 @@ fn test_create_pr_with_content_push_failure() {
         agent: "claude".to_string(),
         base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
-        session_agent: None,
+        session_agents: Default::default(),
         session_name: None,
         worktree_path: Some("/tmp/worktree".to_string()),
         branch_name: Some("feature/test".to_string()),
@@ -537,7 +537,7 @@ fn test_push_changes_to_existing_pr_success() {
         agent: "claude".to_string(),
         base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
-        session_agent: None,
+        session_agents: Default::default(),
         session_name: Some("test-session".to_string()),
         worktree_path: Some("/tmp/worktree".to_string()),
         branch_name: Some("feature/existing".to_string()),
@@ -595,7 +595,7 @@ fn test_push_changes_to_existing_pr_no_changes() {
         agent: "claude".to_string(),
         base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
-        session_agent: None,
+        session_agents: Default::default(),
         session_name: None,
         worktree_path: Some("/tmp/worktree".to_string()),
         branch_name: Some("feature/no-changes".to_string()),
@@ -636,7 +636,7 @@ fn test_push_changes_to_existing_pr_no_url() {
         agent: "claude".to_string(),
         base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
-        session_agent: None,
+        session_agents: Default::default(),
         session_name: None,
         worktree_path: Some("/tmp/worktree".to_string()),
         branch_name: Some("feature/branch".to_string()),
@@ -1891,6 +1891,14 @@ fn test_footer_text_input_description() {
 fn test_setup_task_worktree_success() {
     use crate::db::Task;
 
+    let project = tempfile::tempdir().unwrap();
+    let project_path = project.path().to_path_buf();
+    let worktree_path = project
+        .path()
+        .join("worktree")
+        .to_string_lossy()
+        .into_owned();
+
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
@@ -1901,7 +1909,7 @@ fn test_setup_task_worktree_success() {
     // Expect worktree creation
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug, _, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(move |_, _, _, _, _| Ok(worktree_path.clone()));
 
     // Expect worktree initialization
     mock_git
@@ -1925,7 +1933,7 @@ fn test_setup_task_worktree_success() {
 
     let result = setup_task_worktree(
         &mut task,
-        Path::new("/project"),
+        &project_path,
         "my-project",
         "implement this",
         "main",
@@ -1962,6 +1970,10 @@ fn test_setup_task_worktree_success() {
 fn test_setup_task_worktree_sets_task_fields() {
     use crate::db::Task;
 
+    let project = tempfile::tempdir().unwrap();
+    let project_path = project.path().to_path_buf();
+    let worktree_root = project.path().join(".agtx/worktrees");
+
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
@@ -1971,7 +1983,9 @@ fn test_setup_task_worktree_sets_task_fields() {
 
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug, _, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(move |_, slug, _, _, _| {
+            Ok(worktree_root.join(slug).to_string_lossy().into_owned())
+        });
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _, _| vec![]);
@@ -1987,7 +2001,7 @@ fn test_setup_task_worktree_sets_task_fields() {
 
     let target = setup_task_worktree(
         &mut task,
-        Path::new("/project"),
+        &project_path,
         "my-project",
         "fix the bug",
         "main",
@@ -2036,6 +2050,9 @@ fn test_setup_task_worktree_sets_task_fields() {
 fn test_setup_task_worktree_worktree_creation_fails() {
     use crate::db::Task;
 
+    let project = tempfile::tempdir().unwrap();
+    let project_path = project.path().to_path_buf();
+
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
@@ -2064,7 +2081,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
 
     let result = setup_task_worktree(
         &mut task,
-        Path::new("/project"),
+        &project_path,
         "my-project",
         "do something",
         "main",
@@ -2102,6 +2119,14 @@ fn test_setup_task_worktree_worktree_creation_fails() {
 fn test_setup_task_worktree_tmux_window_fails() {
     use crate::db::Task;
 
+    let project = tempfile::tempdir().unwrap();
+    let project_path = project.path().to_path_buf();
+    let worktree_path = project
+        .path()
+        .join("worktree")
+        .to_string_lossy()
+        .into_owned();
+
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
@@ -2111,7 +2136,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
 
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug, _, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(move |_, _, _, _, _| Ok(worktree_path.clone()));
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _, _| vec![]);
@@ -2129,7 +2154,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
 
     let result = setup_task_worktree(
         &mut task,
-        Path::new("/project"),
+        &project_path,
         "my-project",
         "do something",
         "main",
@@ -2162,6 +2187,14 @@ fn test_setup_task_worktree_tmux_window_fails() {
 fn test_setup_task_worktree_creates_session_when_missing() {
     use crate::db::Task;
 
+    let project = tempfile::tempdir().unwrap();
+    let project_path = project.path().to_path_buf();
+    let worktree_path = project
+        .path()
+        .join("worktree")
+        .to_string_lossy()
+        .into_owned();
+
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
@@ -2171,7 +2204,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
 
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug, _, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(move |_, _, _, _, _| Ok(worktree_path.clone()));
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _, _| vec![]);
@@ -2190,7 +2223,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
 
     let result = setup_task_worktree(
         &mut task,
-        Path::new("/project"),
+        &project_path,
         "my-project",
         "do work",
         "main",
@@ -2221,6 +2254,14 @@ fn test_setup_task_worktree_creates_session_when_missing() {
 fn test_setup_task_worktree_passes_init_config() {
     use crate::db::Task;
 
+    let project = tempfile::tempdir().unwrap();
+    let project_path = project.path().to_path_buf();
+    let worktree_path = project
+        .path()
+        .join("worktree")
+        .to_string_lossy()
+        .into_owned();
+
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
@@ -2231,7 +2272,7 @@ fn test_setup_task_worktree_passes_init_config() {
     mock_git
         .expect_create_worktree()
         .withf(|_, _, base_branch, _, _| base_branch == "development")
-        .returning(|_, slug, _, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(move |_, _, _, _, _| Ok(worktree_path.clone()));
 
     // Verify copy_files and init_script are passed through
     mock_git
@@ -2254,7 +2295,7 @@ fn test_setup_task_worktree_passes_init_config() {
 
     let result = setup_task_worktree(
         &mut task,
-        Path::new("/project"),
+        &project_path,
         "my-project",
         "implement feature",
         "development",
@@ -3404,6 +3445,21 @@ fn a_phase_override_still_beats_the_task_pick() {
     let (agent, switch) = needs_agent_switch(&config, &task, "running");
     assert_eq!(agent, "codex");
     assert!(switch);
+}
+
+#[test]
+fn an_invalid_phase_override_falls_through_to_the_task_pick() {
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
+    use crate::db::Task;
+
+    let mut global = GlobalConfig::default();
+    global.agents.running = Some("missing-instance".to_string());
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    let task = Task::new("Test", "gemini", "project-1");
+
+    let (agent, switch) = needs_agent_switch(&config, &task, "running");
+    assert_eq!(agent, "gemini");
+    assert!(!switch);
 }
 
 #[test]
@@ -6985,6 +7041,83 @@ fn the_wizard_saves_the_agent_that_was_picked() {
     assert_eq!(app.state.board.tasks[0].agent, picked);
 }
 
+#[test]
+fn configured_named_instance_is_available_when_its_base_is_available() {
+    let mut config = make_test_app().state.config.clone();
+    config.agent_profiles.insert(
+        "omp-review".to_string(),
+        crate::config::AgentProfileConfig {
+            agent: "omp".to_string(),
+            profile: Some("review".to_string()),
+            model: Some("cursor/gpt-5.6-sol".to_string()),
+        },
+    );
+    let available = configured_available_agents(
+        vec![crate::agent::Agent::new(
+            "omp",
+            "omp",
+            "Open Multi-Agent Programming",
+            "OMP <noreply@omp.dev>",
+        )],
+        &config,
+    );
+
+    let named = available
+        .iter()
+        .find(|agent| agent.name == "omp-review")
+        .expect("named instance should follow its available base agent");
+    assert_eq!(named.base_name(), "omp");
+    assert_eq!(named.profile.as_deref(), Some("review"));
+    assert_eq!(named.model.as_deref(), Some("cursor/gpt-5.6-sol"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn wizard_saves_named_instance_as_task_fallback() {
+    let mut app = make_test_app_with_agents();
+    let omp = crate::agent::Agent::new(
+        "omp",
+        "omp",
+        "Open Multi-Agent Programming",
+        "OMP <noreply@omp.dev>",
+    );
+    app.state.available_agents.push(crate::agent::Agent::named(
+        "omp-review",
+        &omp,
+        Some("review".to_string()),
+        Some("cursor/gpt-5.6-sol".to_string()),
+    ));
+    app.state.config.agent_profiles.insert(
+        "omp-review".to_string(),
+        crate::config::AgentProfileConfig {
+            agent: "omp".to_string(),
+            profile: Some("review".to_string()),
+            model: Some("cursor/gpt-5.6-sol".to_string()),
+        },
+    );
+
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Named fallback");
+    advance_to(&mut app, WizardStep::Agent);
+    let named_index = app
+        .state
+        .wizard
+        .as_ref()
+        .unwrap()
+        .agent
+        .options
+        .iter()
+        .position(|option| option.name == "omp-review")
+        .unwrap();
+    app.state.wizard.as_mut().unwrap().agent.selected = named_index;
+    advance_to(&mut app, WizardStep::Prompt);
+    press_key(&mut app, KeyCode::Enter);
+
+    let task = &app.state.board.tasks[0];
+    assert_eq!(task.agent, "omp-review");
+    assert_eq!(task.base_agent.as_deref(), Some("omp-review"));
+}
+
 /// `/` opens a filter on a list step. While it is open ordinary characters go
 /// to the filter, which is why navigation there is arrows rather than `j`/`k`.
 #[test]
@@ -8203,12 +8336,118 @@ fn test_transition_to_planning_spawns_background_setup() {
 }
 
 #[test]
-fn named_omp_profile_switches_resume_in_the_first_cycle() {
-    assert!(should_resume_instance("omp-running", "omp", false));
-    assert!(!should_resume_instance("omp", "omp", false));
-    assert!(!should_resume_instance("codex-review", "codex", false));
-    assert!(should_resume_instance("codex-review", "codex", true));
-    assert!(!should_resume_instance("codex", "codex", true));
+fn a_builtin_name_cannot_be_shadowed_in_a_session_snapshot() {
+    let mut config = make_test_app().state.config.clone();
+    config.agent_profiles.insert(
+        "claude".to_string(),
+        crate::config::AgentProfileConfig {
+            agent: "omp".to_string(),
+            profile: Some("shadow".to_string()),
+            model: None,
+        },
+    );
+
+    let snapshot = session_agent_for_instance(&config, "claude");
+    assert_eq!(snapshot.base_agent, "claude");
+    assert_eq!(snapshot.profile, None);
+}
+
+#[test]
+fn only_an_instance_that_has_run_is_a_resume_target() {
+    let mut task = make_test_task("t1", "Resume identity", TaskStatus::Running);
+    assert!(!task.session_agents.contains_key("omp-running"));
+    assert!(!task.session_agents.contains_key("claude"));
+
+    task.session_agents.insert(
+        "omp-running".to_string(),
+        SessionAgent {
+            base_agent: "omp".to_string(),
+            profile: Some("running".to_string()),
+            model: None,
+        },
+    );
+    task.session_agents.insert(
+        "claude".to_string(),
+        SessionAgent {
+            base_agent: "claude".to_string(),
+            profile: None,
+            model: None,
+        },
+    );
+
+    assert!(task.session_agents.contains_key("omp-running"));
+    assert!(task.session_agents.contains_key("claude"));
+    assert!(!task.session_agents.contains_key("omp-review"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn switching_a_to_b_to_a_preserves_each_instance_and_resumes_only_on_return() {
+    let mut config = make_test_app().state.config.clone();
+    for (name, profile) in [("omp-a", "new-a"), ("omp-b", "b")] {
+        config.agent_profiles.insert(
+            name.to_string(),
+            crate::config::AgentProfileConfig {
+                agent: "omp".to_string(),
+                profile: Some(profile.to_string()),
+                model: None,
+            },
+        );
+    }
+    let mut task = make_test_task("t1", "Per-instance sessions", TaskStatus::Running);
+    let original_a = SessionAgent {
+        base_agent: "omp".to_string(),
+        profile: Some("original-a".to_string()),
+        model: Some("cursor/gpt-5.6-sol".to_string()),
+    };
+    task.session_agents
+        .insert("omp-a".to_string(), original_a.clone());
+
+    let registry = MockAgentRegistry::new();
+    let b = session_agent_for_target(&config, &task, "omp-b");
+    let b_ops = operations_for_session_agent("omp-b", &b, &registry);
+    let first_b = build_instance_launch_command(
+        b_ops.as_ref(),
+        task.session_agents.contains_key("omp-b"),
+        "",
+    );
+    assert!(first_b.contains("--profile 'b'"), "{first_b}");
+    assert!(!first_b.contains("--continue"), "{first_b}");
+    task.session_agents.insert("omp-b".to_string(), b.clone());
+
+    let returned_a = session_agent_for_target(&config, &task, "omp-a");
+    let a_ops = operations_for_session_agent("omp-a", &returned_a, &registry);
+    let second_a = build_instance_launch_command(
+        a_ops.as_ref(),
+        task.session_agents.contains_key("omp-a"),
+        "",
+    );
+
+    assert_eq!(returned_a, original_a, "config reload must not rewrite A");
+    assert_eq!(task.session_agents["omp-b"], b);
+    assert!(second_a.contains("--profile 'original-a'"), "{second_a}");
+    assert!(second_a.contains("--continue"), "{second_a}");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_plain_builtin_agent_resumes_after_it_has_run() {
+    let registry = MockAgentRegistry::new();
+    let snapshot = SessionAgent {
+        base_agent: "claude".to_string(),
+        profile: None,
+        model: None,
+    };
+    let operations = operations_for_session_agent("claude", &snapshot, &registry);
+
+    assert_eq!(
+        build_instance_launch_command(operations.as_ref(), false, ""),
+        "claude --dangerously-skip-permissions"
+    );
+    assert_eq!(
+        build_instance_launch_command(operations.as_ref(), true, ""),
+        "claude --dangerously-skip-permissions --continue"
+    );
 }
 
 #[test]
@@ -8254,11 +8493,14 @@ fn config_reload_updates_new_launches_without_reinterpreting_live_sessions() {
     let mut task = make_test_task("t1", "Live review", TaskStatus::Review);
     task.agent = "reviewer".to_string();
     task.session_name = Some("test-project:task-t1".to_string());
-    task.session_agent = Some(SessionAgent {
-        base_agent: "omp".to_string(),
-        profile: Some("review".to_string()),
-        model: Some("cursor/gpt-5.6-sol".to_string()),
-    });
+    task.session_agents.insert(
+        task.agent.clone(),
+        SessionAgent {
+            base_agent: "omp".to_string(),
+            profile: Some("review".to_string()),
+            model: Some("cursor/gpt-5.6-sol".to_string()),
+        },
+    );
     app.state.board.tasks = vec![task];
 
     let mut reloaded = app.state.config.clone();
@@ -8295,15 +8537,18 @@ fn unchanged_instance_keeps_its_persisted_session_profile() {
     );
     let mut task = make_test_task("t1", "Live review", TaskStatus::Review);
     task.agent = "reviewer".to_string();
-    task.session_agent = Some(SessionAgent {
-        base_agent: "omp".to_string(),
-        profile: Some("review".to_string()),
-        model: Some("cursor/gpt-5.6-sol".to_string()),
-    });
+    task.session_agents.insert(
+        task.agent.clone(),
+        SessionAgent {
+            base_agent: "omp".to_string(),
+            profile: Some("review".to_string()),
+            model: Some("cursor/gpt-5.6-sol".to_string()),
+        },
+    );
 
     assert_eq!(
         session_agent_for_target(&config, &task, "reviewer"),
-        task.session_agent.unwrap()
+        task.session_agents["reviewer"].clone()
     );
 }
 
@@ -8326,14 +8571,24 @@ fn refresh_backfills_live_sessions_created_before_snapshots_existed() {
 
     app.refresh_tasks().unwrap();
 
+    let expected = SessionAgent {
+        base_agent: "omp".to_string(),
+        profile: Some("review".to_string()),
+        model: Some("cursor/gpt-5.6-sol".to_string()),
+    };
     assert_eq!(
-        app.state.board.tasks[0].session_agent,
-        Some(SessionAgent {
-            base_agent: "omp".to_string(),
-            profile: Some("review".to_string()),
-            model: Some("cursor/gpt-5.6-sol".to_string()),
-        })
+        app.state.board.tasks[0].session_agents["reviewer"],
+        expected
     );
+    let persisted = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_task("t1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.session_agents["reviewer"], expected);
 }
 
 // --- transition_to_running ---
@@ -8362,15 +8617,18 @@ fn failed_switch_deployment_does_not_advance_agent_state() {
     task.agent = "claude".to_string();
     task.session_name = Some("test-project:task-t1".to_string());
     task.worktree_path = Some(worktree.path().to_string_lossy().into_owned());
-    task.session_agent = Some(SessionAgent {
-        base_agent: "claude".to_string(),
-        profile: None,
-        model: None,
-    });
+    task.session_agents.insert(
+        task.agent.clone(),
+        SessionAgent {
+            base_agent: "claude".to_string(),
+            profile: None,
+            model: None,
+        },
+    );
 
     assert!(app.transition_to_running(&mut task).is_err());
     assert_eq!(task.agent, "claude");
-    assert_eq!(task.session_agent.as_ref().unwrap().base_agent, "claude");
+    assert_eq!(task.session_agents["claude"].base_agent, "claude");
     assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
 }
 
@@ -12845,7 +13103,7 @@ fn test_deploy_skill_writes_canonical_path() {
     let dir = tempfile::tempdir().unwrap();
     let content = "---\nname: agtx-plan\ndescription: Plan\n---\nPlan the work.";
 
-    deploy_skill(dir.path(), "agtx-plan", content, "claude");
+    deploy_skill(dir.path(), "agtx-plan", content, "claude").unwrap();
 
     assert!(
         dir.path().join(".agtx/skills/agtx-plan/SKILL.md").exists(),
@@ -12858,7 +13116,7 @@ fn test_deploy_skill_claude_transforms_frontmatter() {
     let dir = tempfile::tempdir().unwrap();
     let content = "---\nname: agtx-plan\ndescription: Plan\n---\nPlan the work.";
 
-    deploy_skill(dir.path(), "agtx-plan", content, "claude");
+    deploy_skill(dir.path(), "agtx-plan", content, "claude").unwrap();
 
     let native = dir.path().join(".claude/commands/agtx/plan.md");
     assert!(
@@ -12877,7 +13135,7 @@ fn test_deploy_skill_gemini_writes_toml() {
     let dir = tempfile::tempdir().unwrap();
     let content = "---\nname: agtx-plan\ndescription: Plan the work\n---\nPlan it.";
 
-    deploy_skill(dir.path(), "agtx-plan", content, "gemini");
+    deploy_skill(dir.path(), "agtx-plan", content, "gemini").unwrap();
 
     let native = dir.path().join(".gemini/commands/agtx/plan.toml");
     assert!(
@@ -12900,7 +13158,7 @@ fn test_deploy_skill_codex_writes_skill_subdir() {
     let dir = tempfile::tempdir().unwrap();
     let content = "---\nname: agtx-plan\ndescription: Plan\n---\nPlan it.";
 
-    deploy_skill(dir.path(), "agtx-plan", content, "codex");
+    deploy_skill(dir.path(), "agtx-plan", content, "codex").unwrap();
 
     assert!(
         dir.path().join(".codex/skills/agtx-plan/SKILL.md").exists(),
@@ -12913,7 +13171,7 @@ fn test_deploy_skill_opencode_writes_flat_md() {
     let dir = tempfile::tempdir().unwrap();
     let content = "---\nname: agtx-plan\ndescription: Plan the work\n---\nPlan it.";
 
-    deploy_skill(dir.path(), "agtx-plan", content, "opencode");
+    deploy_skill(dir.path(), "agtx-plan", content, "opencode").unwrap();
 
     let native = dir.path().join(".opencode/command/agtx-plan.md");
     assert!(
@@ -12932,7 +13190,7 @@ fn test_deploy_skill_cursor_writes_skill_subdir() {
     let dir = tempfile::tempdir().unwrap();
     let content = "---\nname: agtx-plan\ndescription: Plan\n---\nPlan it.";
 
-    deploy_skill(dir.path(), "agtx-plan", content, "cursor");
+    deploy_skill(dir.path(), "agtx-plan", content, "cursor").unwrap();
 
     assert!(
         dir.path()
@@ -12948,7 +13206,7 @@ fn test_deploy_skill_unknown_agent_only_canonical() {
     let dir = tempfile::tempdir().unwrap();
     let content = "---\nname: agtx-plan\ndescription: Plan\n---\nPlan it.";
 
-    deploy_skill(dir.path(), "agtx-plan", content, "unknownagent");
+    deploy_skill(dir.path(), "agtx-plan", content, "unknownagent").unwrap();
 
     assert!(
         dir.path().join(".agtx/skills/agtx-plan/SKILL.md").exists(),
@@ -14481,7 +14739,7 @@ fn test_deploy_skill_paths_for_every_agent() {
 
     for (agent, rel) in expected {
         let dir = tempfile::tempdir().unwrap();
-        deploy_skill(dir.path(), "agtx-plan", content, agent);
+        deploy_skill(dir.path(), "agtx-plan", content, agent).unwrap();
 
         let native = dir.path().join(rel);
         assert!(native.exists(), "{agent}: expected {rel}");
@@ -17433,6 +17691,21 @@ fn malformed_legacy_omp_mcp_stays_excluded() {
     assert!(migrated.lines().any(|line| line == ".omp/mcp.json"));
 }
 #[test]
+fn atomic_replacement_cleans_up_temp_file_on_rename_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("mcp.json");
+    std::fs::create_dir_all(&target).unwrap();
+
+    assert!(replace_file_atomically(&target, b"replacement").is_err());
+    let entries: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries, vec!["mcp.json"]);
+    assert!(target.is_dir());
+}
+
+#[test]
 #[cfg(feature = "test-mocks")]
 fn legacy_omp_mcp_migration_preserves_user_servers_and_fields() {
     let dir = tempfile::tempdir().unwrap();
@@ -17493,13 +17766,43 @@ fn non_omp_deployment_refuses_symlinked_skill_destinations() {
 
     let worktree = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(worktree.path().join(".agtx")).unwrap();
+    std::fs::write(worktree.path().join(DEPLOY_MARKER), "stale binary").unwrap();
     std::fs::create_dir_all(worktree.path().join(".claude")).unwrap();
     symlink(outside.path(), worktree.path().join(".claude/commands")).unwrap();
 
-    let result = ensure_deployment_paths_safe(worktree.path(), &["claude"]);
+    let result = write_skills_to_worktree(
+        &worktree.path().to_string_lossy(),
+        worktree.path(),
+        &None,
+        &["claude"],
+        false,
+    );
 
     assert!(result.is_err());
     assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    assert!(!worktree.path().join(DEPLOY_MARKER).exists());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn failed_deployment_does_not_write_success_marker() {
+    let worktree = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(worktree.path().join(".agtx")).unwrap();
+    std::fs::write(worktree.path().join(DEPLOY_MARKER), "stale binary").unwrap();
+    std::fs::create_dir_all(worktree.path().join(".claude/settings.local.json")).unwrap();
+
+    let result = write_skills_to_worktree(
+        &worktree.path().to_string_lossy(),
+        worktree.path(),
+        &None,
+        &["claude"],
+        false,
+    );
+
+    assert!(result.is_err());
+    assert!(worktree.path().join(".agtx/skills").exists());
+    assert!(!worktree.path().join(DEPLOY_MARKER).exists());
 }
 
 #[test]

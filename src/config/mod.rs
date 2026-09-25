@@ -842,6 +842,19 @@ impl MergedConfig {
         }
     }
 
+    /// Return a usable named-instance definition.
+    ///
+    /// Built-in identities cannot be shadowed, and profiles whose base is not a
+    /// known agent are ignored everywhere rather than only in the registry.
+    pub fn named_agent_profile(&self, instance_name: &str) -> Option<&AgentProfileConfig> {
+        if crate::agent::spec(instance_name).is_some() {
+            return None;
+        }
+        self.agent_profiles
+            .get(instance_name)
+            .filter(|profile| crate::agent::spec(&profile.agent).is_some())
+    }
+
     fn configured_base_agent_name<'a>(&'a self, instance_name: &'a str) -> Option<&'a str> {
         // Built-in identities cannot be shadowed by a named profile. This matches
         // RealAgentRegistry::with_profiles and prevents the UI from applying one
@@ -849,9 +862,8 @@ impl MergedConfig {
         if crate::agent::spec(instance_name).is_some() {
             return Some(instance_name);
         }
-        self.agent_profiles
-            .get(instance_name)
-            .and_then(|profile| crate::agent::spec(&profile.agent).map(|_| profile.agent.as_str()))
+        self.named_agent_profile(instance_name)
+            .map(|profile| profile.agent.as_str())
     }
 
     /// Resolve an instance name to the base identity used by AgentSpec and plugin manifests.

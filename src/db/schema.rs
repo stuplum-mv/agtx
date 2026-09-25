@@ -213,6 +213,9 @@ impl Database {
         let _ = self
             .conn
             .execute("ALTER TABLE tasks ADD COLUMN session_agent TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN session_agents TEXT", []);
         // A task that has never had a session has never been switched, so its
         // `agent` is still the pick it was created with. Any other row's `agent`
         // may be a per-phase override's, and is left to the configured default.
@@ -363,15 +366,18 @@ impl Database {
     // === Task Operations ===
 
     pub fn create_task(&self, task: &Task) -> Result<()> {
+        let session_agents = serde_json::to_string(&task.session_agents)?;
+        // Keep the previous single-snapshot column populated so a database
+        // remains readable by the immediately preceding agtx release.
         let session_agent = task
-            .session_agent
-            .as_ref()
+            .session_agents
+            .get(&task.agent)
             .map(serde_json::to_string)
             .transpose()?;
         self.conn.execute(
             r#"
-            INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at, phase_entered_at, base_agent, session_agent)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+            INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at, phase_entered_at, base_agent, session_agent, session_agents)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
             "#,
             params![
                 task.id,
@@ -395,6 +401,7 @@ impl Database {
                 task.phase_entered_at.map(|t| t.to_rfc3339()),
                 task.base_agent,
                 session_agent,
+                session_agents,
             ],
         )?;
         Ok(())
@@ -403,15 +410,16 @@ impl Database {
     pub fn create_tasks_batch(&mut self, tasks: &[Task]) -> Result<()> {
         let tx = self.conn.transaction()?;
         for task in tasks {
+            let session_agents = serde_json::to_string(&task.session_agents)?;
             let session_agent = task
-                .session_agent
-                .as_ref()
+                .session_agents
+                .get(&task.agent)
                 .map(serde_json::to_string)
                 .transpose()?;
             tx.execute(
                 r#"
-                INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at, phase_entered_at, base_agent, session_agent)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+                INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at, phase_entered_at, base_agent, session_agent, session_agents)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
                 "#,
                 params![
                     task.id,
@@ -435,6 +443,7 @@ impl Database {
                     task.phase_entered_at.map(|t| t.to_rfc3339()),
                     task.base_agent,
                     session_agent,
+                    session_agents,
                 ],
             )?;
         }
@@ -451,9 +460,12 @@ impl Database {
     /// SQLite evaluates every `SET` expression against the old row — so the stamp
     /// needs no read first and cannot race one.
     pub fn update_task(&self, task: &Task) -> Result<()> {
+        let session_agents = serde_json::to_string(&task.session_agents)?;
+        // Keep the previous single-snapshot column populated so a database
+        // remains readable by the immediately preceding agtx release.
         let session_agent = task
-            .session_agent
-            .as_ref()
+            .session_agents
+            .get(&task.agent)
             .map(serde_json::to_string)
             .transpose()?;
         self.conn.execute(
@@ -476,7 +488,8 @@ impl Database {
                 updated_at = ?16,
                 phase_entered_at = CASE WHEN status != ?4 THEN ?17 ELSE phase_entered_at END,
                 base_agent = ?18,
-                session_agent = ?19
+                session_agent = ?19,
+                session_agents = ?20
             WHERE id = ?1
             "#,
             params![
@@ -499,6 +512,7 @@ impl Database {
                 chrono::Utc::now().to_rfc3339(),
                 task.base_agent,
                 session_agent,
+                session_agents,
             ],
         )?;
         Ok(())
@@ -511,21 +525,35 @@ impl Database {
     }
 
     fn task_from_row(row: &rusqlite::Row) -> rusqlite::Result<Task> {
+        let agent: String = row.get("agent")?;
+        let mut session_agents: std::collections::BTreeMap<String, super::models::SessionAgent> =
+            row.get::<_, Option<String>>("session_agents")
+                .ok()
+                .flatten()
+                .and_then(|value| serde_json::from_str(&value).ok())
+                .unwrap_or_default();
+        // Promote the legacy active snapshot whenever the map does not already
+        // have that instance. This covers both pre-map rows and a task switched
+        // by the preceding release after a temporary downgrade.
+        if let Some(snapshot) = row
+            .get::<_, Option<String>>("session_agent")
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_str(&value).ok())
+        {
+            session_agents.entry(agent.clone()).or_insert(snapshot);
+        }
         Ok(Task {
             id: row.get("id")?,
             title: row.get("title")?,
             description: row.get("description")?,
             status: TaskStatus::from_str(&row.get::<_, String>("status")?)
                 .unwrap_or(TaskStatus::Backlog),
-            agent: row.get("agent")?,
+            agent,
             base_agent: row.get("base_agent").ok().flatten(),
             project_id: row.get("project_id")?,
             session_name: row.get("session_name")?,
-            session_agent: row
-                .get::<_, Option<String>>("session_agent")
-                .ok()
-                .flatten()
-                .and_then(|value| serde_json::from_str(&value).ok()),
+            session_agents,
             worktree_path: row.get("worktree_path")?,
             branch_name: row.get("branch_name").ok().flatten(),
             pr_number: row.get("pr_number").ok().flatten(),
@@ -1174,5 +1202,64 @@ impl Database {
                 .and_then(parse)
                 .unwrap_or_else(chrono::Utc::now),
         })
+    }
+}
+
+#[cfg(all(test, feature = "test-mocks"))]
+mod tests {
+    use super::*;
+    use crate::db::SessionAgent;
+
+    #[test]
+    fn legacy_single_session_snapshot_is_promoted_under_the_active_instance() {
+        let db = Database::open_in_memory_project().unwrap();
+        let mut task = Task::new("Legacy session", "omp-review", "project");
+        let snapshot = SessionAgent {
+            base_agent: "omp".to_string(),
+            profile: Some("review".to_string()),
+            model: Some("provider/model".to_string()),
+        };
+        task.session_agents
+            .insert(task.agent.clone(), snapshot.clone());
+        db.create_task(&task).unwrap();
+        db.conn
+            .execute(
+                "UPDATE tasks SET session_agents = NULL WHERE id = ?1",
+                params![task.id],
+            )
+            .unwrap();
+
+        let restored = db.get_task(&task.id).unwrap().unwrap();
+        assert_eq!(restored.session_agents.len(), 1);
+        assert_eq!(restored.session_agents["omp-review"], snapshot);
+    }
+
+    #[test]
+    fn legacy_active_snapshot_fills_a_missing_entry_in_an_existing_map() {
+        let db = Database::open_in_memory_project().unwrap();
+        let mut task = Task::new("Downgraded session", "omp-a", "project");
+        let snapshot_a = SessionAgent {
+            base_agent: "omp".to_string(),
+            profile: Some("a".to_string()),
+            model: None,
+        };
+        let snapshot_b = SessionAgent {
+            base_agent: "omp".to_string(),
+            profile: Some("b".to_string()),
+            model: Some("provider/model".to_string()),
+        };
+        task.session_agents
+            .insert("omp-a".to_string(), snapshot_a.clone());
+        db.create_task(&task).unwrap();
+        db.conn
+            .execute(
+                "UPDATE tasks SET agent = 'omp-b', session_agent = ?2 WHERE id = ?1",
+                params![task.id, serde_json::to_string(&snapshot_b).unwrap()],
+            )
+            .unwrap();
+
+        let restored = db.get_task(&task.id).unwrap().unwrap();
+        assert_eq!(restored.session_agents["omp-a"], snapshot_a);
+        assert_eq!(restored.session_agents["omp-b"], snapshot_b);
     }
 }
