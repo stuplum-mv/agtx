@@ -67,6 +67,9 @@ pub struct SessionAgent {
     pub base_agent: String,
     pub profile: Option<String>,
     pub model: Option<String>,
+    /// Per-task conversation store for adapters that support explicit isolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_route: Option<SessionModelRoute>,
 }

@@ -180,6 +180,7 @@ fn a_session_keeps_the_agent_definition_it_was_launched_with() {
             base_agent: "omp".to_string(),
             profile: Some("review".to_string()),
             model: Some("cursor/gpt-5.6".to_string()),
+            session_dir: Some("/tmp/agtx-sessions/task/omp-review".to_string()),
             model_route: None,
         },
     );
@@ -189,6 +190,7 @@ fn a_session_keeps_the_agent_definition_it_was_launched_with() {
             base_agent: "claude".to_string(),
             profile: None,
             model: Some("opus".to_string()),
+            session_dir: None,
             model_route: None,
         },
     );

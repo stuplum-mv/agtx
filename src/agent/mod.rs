@@ -26,6 +26,9 @@ pub struct Agent {
     pub profile: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Directory that isolates this named instance's persisted conversations.
+    #[serde(default)]
+    pub session_dir: Option<String>,
     pub command: String,
     pub description: String,
     pub co_author: String,
@@ -70,6 +73,7 @@ impl Agent {
             base_name: name.to_string(),
             profile: None,
             model: None,
+            session_dir: None,
             command: command.to_string(),
             description: description.to_string(),
             co_author: co_author.to_string(),
@@ -83,10 +87,17 @@ impl Agent {
             base_name: base.base_name().to_string(),
             profile,
             model,
+            session_dir: None,
             command: base.command.clone(),
             description: base.description.clone(),
             co_author: base.co_author.clone(),
         }
+    }
+
+    /// Attach a persisted-conversation directory supplied by the task session.
+    pub fn with_session_dir(mut self, session_dir: Option<String>) -> Self {
+        self.session_dir = session_dir;
+        self
     }
 
     /// Built-in identity used for specs, distinct from the configured instance name.
@@ -155,6 +166,7 @@ impl Agent {
                 None,
                 self.profile.as_deref(),
                 model_word,
+                self.session_dir.as_deref(),
             ),
             None => spec::compose_command_with_options(
                 s,
@@ -162,6 +174,7 @@ impl Agent {
                 None,
                 self.profile.as_deref(),
                 self.model.as_deref(),
+                self.session_dir.as_deref(),
             ),
         }
     }
@@ -188,6 +201,7 @@ impl Agent {
                 Some(prompt),
                 self.profile.as_deref(),
                 model_word,
+                self.session_dir.as_deref(),
             ),
             (Some(s), None) => spec::compose_command_with_options(
                 s,
@@ -195,6 +209,7 @@ impl Agent {
                 Some(prompt),
                 self.profile.as_deref(),
                 self.model.as_deref(),
+                self.session_dir.as_deref(),
             ),
             (None, _) if prompt.is_empty() => self.command.clone(),
             (None, _) => format!("{} '{}'", self.command, prompt.replace('\'', "'\"'\"'")),
@@ -272,17 +287,18 @@ mod tests {
             &base,
             Some("team's profile".into()),
             Some("openai/gpt 5".into()),
-        );
+        )
+        .with_session_dir(Some("/tmp/agtx task/omp-work".into()));
 
         assert_eq!(agent.name, "omp-work");
         assert_eq!(agent.base_name(), "omp");
         assert_eq!(
             agent.build_interactive_command("fix 'this'"),
-            "omp --profile 'team'\"'\"'s profile' --model 'openai/gpt 5' --auto-approve --plugin-dir .agtx/omp-plugin 'fix '\"'\"'this'\"'\"''"
+            "omp --profile 'team'\"'\"'s profile' --model 'openai/gpt 5' --session-dir '/tmp/agtx task/omp-work' --auto-approve --plugin-dir .agtx/omp-plugin 'fix '\"'\"'this'\"'\"''"
         );
         assert_eq!(
             agent.build_resume_command(),
-            "omp --profile 'team'\"'\"'s profile' --model 'openai/gpt 5' --auto-approve --plugin-dir .agtx/omp-plugin --continue"
+            "omp --profile 'team'\"'\"'s profile' --model 'openai/gpt 5' --session-dir '/tmp/agtx task/omp-work' --auto-approve --plugin-dir .agtx/omp-plugin --continue"
         );
 
         let (binary, args) = agent.headless_invocation("describe");

@@ -801,12 +801,14 @@ fn session_agent_for_instance(config: &MergedConfig, instance_name: &str) -> Ses
             base_agent: profile.agent.clone(),
             profile: profile.profile.clone(),
             model: profile.model.clone(),
+            session_dir: None,
             model_route: None,
         },
         None => SessionAgent {
             base_agent: config.base_agent_name(instance_name).to_string(),
             profile: None,
             model: None,
+            session_dir: None,
             model_route: None,
         },
     }
@@ -817,10 +819,32 @@ fn session_agent_snapshot_for_target(
     task: &Task,
     instance_name: &str,
 ) -> SessionAgent {
-    task.session_agents
+    let mut snapshot = task
+        .session_agents
         .get(instance_name)
         .cloned()
-        .unwrap_or_else(|| session_agent_for_instance(config, instance_name))
+        .unwrap_or_else(|| session_agent_for_instance(config, instance_name));
+    if !task.session_agents.contains_key(instance_name)
+        && snapshot.session_dir.is_none()
+        && instance_name != snapshot.base_agent
+    {
+        snapshot.session_dir = agent::spec::spec(&snapshot.base_agent)
+            .and_then(|spec| spec.session_dir_flag)
+            .and_then(|_| {
+                let mut hasher = Sha256::new();
+                hasher.update(instance_name.as_bytes());
+                let instance_key = format!("{:x}", hasher.finalize());
+                GlobalConfig::data_dir().ok().map(|data_dir| {
+                    data_dir
+                        .join("agent-sessions")
+                        .join(&task.id)
+                        .join(instance_key)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            });
+    }
+    snapshot
 }
 
 fn session_agent_for_target(
@@ -920,7 +944,8 @@ fn operations_for_session_agent(
                 &base,
                 snapshot.profile.clone(),
                 snapshot.model.clone(),
-            );
+            )
+            .with_session_dir(snapshot.session_dir.clone());
             let coding = snapshot
                 .model_route
                 .as_ref()
@@ -3977,7 +4002,7 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {
                 self.state.trust_confirm_popup = None;
                 self.state.warning_message = Some((
-                    "Left untrusted. init_script, cleanup_script and copy_files stay disabled."
+                    "Left untrusted. init_script, cleanup_script, copy_files, and model_routing stay disabled."
                         .to_string(),
                     Instant::now(),
                 ));
@@ -3996,7 +4021,7 @@ impl App {
                     Some((format!("Failed to trust project: {}", e), Instant::now()));
                 return Ok(());
             }
-            // Re-enable scripts by reloading project config and re-merging
+            // Re-enable suppressed fields by reloading project config and re-merging
             let project_config =
                 crate::config::ProjectConfig::load(&popup.project_path).unwrap_or_default();
             let global_config = crate::config::GlobalConfig::load().unwrap_or_default();
@@ -4004,7 +4029,7 @@ impl App {
             self.install_config_for_current_project(config);
             self.state.flags.no_init_scripts = false;
             self.state.warning_message = Some((
-                "Project trusted. init_script, cleanup_script, and copy_files are now active."
+                "Project trusted. init_script, cleanup_script, copy_files, and model_routing are now active."
                     .to_string(),
                 Instant::now(),
             ));

@@ -358,9 +358,11 @@ Per-project overrides at `{project}/.agtx/config.toml` (`ProjectConfig`), merged
 
 Agent precedence is explicit phase instance → task wizard fallback → global default. `Task::agent`
 tracks the active instance, `Task::base_agent` stores the wizard fallback, and
-`Task::session_agents` stores immutable launch snapshots by instance name. Do not use the instance
-name for plugin compatibility, skills, hooks, readiness, or lifecycle behavior; resolve those from
-the snapshot/configured base identity.
+`Task::session_agents` stores immutable launch snapshots by instance name. Adapters with
+`AgentSpec::session_dir_flag` also snapshot a task-and-instance-specific conversation directory (OMP's
+verified `--session-dir` implementation), so same-base aliases cannot both resume the pane's latest
+conversation. Do not use the instance name for plugin compatibility, skills, hooks, readiness, or
+lifecycle behavior; resolve those from the snapshot/configured base identity.
 
 Model routing is phase-entry only. Resolution is fixed profile model → Jev capability tier →
 `model_routing.models.<base-agent>` model. The TUI writes an owner-only request under

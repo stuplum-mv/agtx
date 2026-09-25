@@ -256,6 +256,11 @@ pub struct AgentSpec {
     /// Optional CLI flags accepted before unattended/headless arguments.
     pub profile_flag: Option<&'static str>,
     pub model_flag: Option<&'static str>,
+    /// Optional flag that scopes persisted conversations to a directory.
+    ///
+    /// agtx supplies a task-and-instance-specific directory for named instances,
+    /// preventing two aliases of the same CLI from both resuming "latest".
+    pub session_dir_flag: Option<&'static str>,
     /// Flags that make the agent run unattended (permission bypass, sandbox mode).
     pub base_args: &'static [&'static str],
     pub prompt_form: PromptForm,
@@ -355,6 +360,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         env: &[],
         profile_flag: None,
         model_flag: Some("--model"),
+        session_dir_flag: None,
         base_args: &["--dangerously-skip-permissions"],
         prompt_form: PromptForm::Argv,
         // Verified against claude 2.1.241: `claude [prompt]` starts an
@@ -449,6 +455,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         env: &[],
         profile_flag: None,
         model_flag: Some("--model"),
+        session_dir_flag: None,
         base_args: &["--sandbox", "workspace-write"],
         prompt_form: PromptForm::Argv,
         // Verified against codex-cli 0.144.5: `codex --sandbox workspace-write
@@ -545,6 +552,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         env: &[],
         profile_flag: None,
         model_flag: None,
+        session_dir_flag: None,
         base_args: &["--allow-all-tools"],
         // `-i` keeps the session interactive; `-p` is print mode and exits on
         // completion, which killed every copilot task until it was fixed.
@@ -593,6 +601,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         env: &[("GEMINI_TRUST_WORKSPACE", "true")],
         profile_flag: None,
         model_flag: Some("--model"),
+        session_dir_flag: None,
         base_args: &["--approval-mode", "yolo"],
         prompt_form: PromptForm::Flag("-i"),
         // Verified against gemini 0.46.0: `gemini … -i '<prompt>'` delivers the
@@ -645,6 +654,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         env: &[],
         profile_flag: None,
         model_flag: Some("--model"),
+        session_dir_flag: None,
         base_args: &[],
         // `--prompt`, not `-p`: opencode has no `-p` short form at all, so the
         // previous value would have failed the moment it was used. Verified
@@ -687,6 +697,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         env: &[],
         profile_flag: None,
         model_flag: Some("--model"),
+        session_dir_flag: None,
         // `--trust` is "trust the current workspace without prompting". It is not
         // an escalation on top of `--yolo`, which already auto-runs every tool —
         // refusing the narrower flag while passing the broader one would be
@@ -747,6 +758,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         env: &[],
         profile_flag: None,
         model_flag: None,
+        session_dir_flag: None,
         // `--trust` also ungates the repo-local `.grok/config.toml` MCP server
         // and suppresses the directory-trust dialog.
         base_args: &["--yolo", "--trust"],
@@ -790,6 +802,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         env: &[],
         profile_flag: None,
         model_flag: None,
+        session_dir_flag: None,
         // Two orthogonal controls: the flag governs shell/MCP/URL approvals,
         // `--mode` governs the file-edit diff review. Both are needed to run
         // unattended.
@@ -871,6 +884,10 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // Verified against omp 18.2.0; selection flags precede unattended flags.
         profile_flag: Some("--profile"),
         model_flag: Some("--model"),
+        // Verified against omp 18.2.11. Unlike --profile, this isolates only
+        // conversations; authentication, settings and caches stay in the
+        // selected (or default) profile.
+        session_dir_flag: Some("--session-dir"),
         base_args: &["--auto-approve", "--plugin-dir", ".agtx/omp-plugin"],
         prompt_form: PromptForm::Argv,
         launch_prompt_verified: true,
@@ -913,6 +930,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         env: &[],
         profile_flag: None,
         model_flag: None,
+        session_dir_flag: None,
         // pi ships no permission system, so there is no --yolo equivalent and
         // none is needed. What does block an unattended start is the project
         // trust prompt, which fires in any directory carrying project-local
@@ -1028,7 +1046,7 @@ pub fn can_launch_with_prompt(injection: crate::agent::PromptInjection, text: &s
 }
 
 pub fn compose_command(spec: &AgentSpec, args: &[&str], prompt: Option<&str>) -> String {
-    compose_command_with_options(spec, args, prompt, None, None)
+    compose_command_with_options(spec, args, prompt, None, None, None)
 }
 
 /// Compose an interactive command with instance-level profile/model selection.
@@ -1040,8 +1058,9 @@ pub fn compose_command_with_options(
     prompt: Option<&str>,
     profile: Option<&str>,
     model: Option<&str>,
+    session_dir: Option<&str>,
 ) -> String {
-    compose_command_with_model_word(spec, args, prompt, profile, model, None)
+    compose_command_with_model_word(spec, args, prompt, profile, model, None, session_dir)
 }
 
 /// Compose a command whose model is resolved by a trusted shell word such as
@@ -1053,8 +1072,17 @@ pub fn compose_command_with_dynamic_model(
     prompt: Option<&str>,
     profile: Option<&str>,
     model_word: &str,
+    session_dir: Option<&str>,
 ) -> String {
-    compose_command_with_model_word(spec, args, prompt, profile, None, Some(model_word))
+    compose_command_with_model_word(
+        spec,
+        args,
+        prompt,
+        profile,
+        None,
+        Some(model_word),
+        session_dir,
+    )
 }
 
 fn compose_command_with_model_word(
@@ -1064,6 +1092,7 @@ fn compose_command_with_model_word(
     profile: Option<&str>,
     model: Option<&str>,
     dynamic_model_word: Option<&str>,
+    session_dir: Option<&str>,
 ) -> String {
     let mut out = String::new();
     for (key, value) in spec.env {
@@ -1091,6 +1120,12 @@ fn compose_command_with_model_word(
             out.push(' ');
             out.push_str(word);
         }
+    }
+    if let (Some(flag), Some(value)) = (spec.session_dir_flag, session_dir) {
+        out.push(' ');
+        out.push_str(flag);
+        out.push(' ');
+        out.push_str(&shell_quote(value));
     }
     for arg in args {
         out.push(' ');
@@ -1188,6 +1223,7 @@ mod tests {
         assert_eq!(omp.binary, "omp");
         assert_eq!(omp.profile_flag, Some("--profile"));
         assert_eq!(omp.model_flag, Some("--model"));
+        assert_eq!(omp.session_dir_flag, Some("--session-dir"));
         assert_eq!(
             omp.base_args,
             &["--auto-approve", "--plugin-dir", ".agtx/omp-plugin"]

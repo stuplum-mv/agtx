@@ -626,7 +626,9 @@ be selected in the task wizard, used as `default_agent`, or assigned to a phase.
 
 The first visit to an instance starts a fresh session. agtx stores session identity per instance, so
 switching `A → B → A` resumes A with the same base agent, profile, and model it originally used—even
-if configuration was reloaded in the meantime. Existing string values such as
+if configuration was reloaded in the meantime. For OMP, agtx also passes a task-and-instance-specific
+`--session-dir`, so two named instances remain isolated even when both omit `profile`; this changes only
+conversation storage, not OMP authentication, settings, or caches. Existing string values such as
 `running = "codex"` remain valid.
 
 ```toml

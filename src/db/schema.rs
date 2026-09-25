@@ -1218,6 +1218,7 @@ mod tests {
             base_agent: "omp".to_string(),
             profile: Some("review".to_string()),
             model: Some("provider/model".to_string()),
+            session_dir: None,
             model_route: None,
         };
         task.session_agents
@@ -1243,12 +1244,14 @@ mod tests {
             base_agent: "omp".to_string(),
             profile: Some("a".to_string()),
             model: None,
+            session_dir: None,
             model_route: None,
         };
         let snapshot_b = SessionAgent {
             base_agent: "omp".to_string(),
             profile: Some("b".to_string()),
             model: Some("provider/model".to_string()),
+            session_dir: None,
             model_route: None,
         };
         task.session_agents

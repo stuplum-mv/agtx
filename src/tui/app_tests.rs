@@ -8364,6 +8364,7 @@ fn only_an_instance_that_has_run_is_a_resume_target() {
             base_agent: "omp".to_string(),
             profile: Some("running".to_string()),
             model: None,
+            session_dir: None,
             model_route: None,
         },
     );
@@ -8373,6 +8374,7 @@ fn only_an_instance_that_has_run_is_a_resume_target() {
             base_agent: "claude".to_string(),
             profile: None,
             model: None,
+            session_dir: None,
             model_route: None,
         },
     );
@@ -8401,6 +8403,7 @@ fn switching_a_to_b_to_a_preserves_each_instance_and_resumes_only_on_return() {
         base_agent: "omp".to_string(),
         profile: Some("original-a".to_string()),
         model: Some("cursor/gpt-5.6-sol".to_string()),
+        session_dir: None,
         model_route: None,
     };
     task.session_agents
@@ -8434,12 +8437,51 @@ fn switching_a_to_b_to_a_preserves_each_instance_and_resumes_only_on_return() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
+fn fresh_named_omp_instances_get_distinct_task_scoped_session_directories() {
+    let mut config = make_test_app().state.config.clone();
+    for name in ["omp-a", "omp-b"] {
+        config.agent_profiles.insert(
+            name.to_string(),
+            crate::config::AgentProfileConfig {
+                agent: "omp".to_string(),
+                profile: None,
+                model: None,
+            },
+        );
+    }
+    let task = make_test_task("task-one", "Isolated sessions", TaskStatus::Running);
+    let a = session_agent_for_target(&config, &task, "omp-a", "planning");
+    let b = session_agent_for_target(&config, &task, "omp-b", "running");
+    let other_task = make_test_task("task-two", "Other task", TaskStatus::Running);
+    let other_a = session_agent_for_target(&config, &other_task, "omp-a", "planning");
+
+    let a_dir = a.session_dir.as_deref().expect("OMP A session directory");
+    let b_dir = b.session_dir.as_deref().expect("OMP B session directory");
+    let other_a_dir = other_a
+        .session_dir
+        .as_deref()
+        .expect("other task OMP A session directory");
+    assert_ne!(a_dir, b_dir);
+    assert_ne!(a_dir, other_a_dir);
+    assert!(a_dir.contains("agent-sessions/task-one/"), "{a_dir}");
+    assert!(b_dir.contains("agent-sessions/task-one/"), "{b_dir}");
+
+    let registry = MockAgentRegistry::new();
+    let a_command = operations_for_session_agent("omp-a", &a, &registry).build_resume_command();
+    let b_command = operations_for_session_agent("omp-b", &b, &registry).build_resume_command();
+    assert!(a_command.contains(&format!("--session-dir '{}'", a_dir)));
+    assert!(b_command.contains(&format!("--session-dir '{}'", b_dir)));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
 fn a_plain_builtin_agent_resumes_after_it_has_run() {
     let registry = MockAgentRegistry::new();
     let snapshot = SessionAgent {
         base_agent: "claude".to_string(),
         profile: None,
         model: None,
+        session_dir: None,
         model_route: None,
     };
     let operations = operations_for_session_agent("claude", &snapshot, &registry);
@@ -8503,6 +8545,7 @@ fn config_reload_updates_new_launches_without_reinterpreting_live_sessions() {
             base_agent: "omp".to_string(),
             profile: Some("review".to_string()),
             model: Some("cursor/gpt-5.6-sol".to_string()),
+            session_dir: None,
             model_route: None,
         },
     );
@@ -8548,6 +8591,7 @@ fn unchanged_instance_keeps_its_persisted_session_profile() {
             base_agent: "omp".to_string(),
             profile: Some("review".to_string()),
             model: Some("cursor/gpt-5.6-sol".to_string()),
+            session_dir: None,
             model_route: None,
         },
     );
@@ -8581,6 +8625,7 @@ fn refresh_backfills_live_sessions_created_before_snapshots_existed() {
         base_agent: "omp".to_string(),
         profile: Some("review".to_string()),
         model: Some("cursor/gpt-5.6-sol".to_string()),
+        session_dir: None,
         model_route: None,
     };
     assert_eq!(
@@ -8630,6 +8675,7 @@ fn failed_switch_deployment_does_not_advance_agent_state() {
             base_agent: "claude".to_string(),
             profile: None,
             model: None,
+            session_dir: None,
             model_route: None,
         },
     );

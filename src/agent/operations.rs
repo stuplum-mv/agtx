@@ -306,6 +306,23 @@ mod tests {
     }
 
     #[test]
+    fn routed_omp_keeps_its_isolated_session_for_launch_and_resume() {
+        let base = super::super::get_agent("omp").unwrap();
+        let instance = super::super::Agent::named("omp-review", &base, None, None)
+            .with_session_dir(Some("/tmp/agtx task/review".to_string()));
+        let routed = CodingAgent::with_dynamic_model(instance, "$(route-model)".to_string());
+
+        assert_eq!(
+            routed.build_interactive_command("review"),
+            "omp --model $(route-model) --session-dir '/tmp/agtx task/review' --auto-approve --plugin-dir .agtx/omp-plugin 'review'"
+        );
+        assert_eq!(
+            routed.build_resume_command(),
+            "omp --model $(route-model) --session-dir '/tmp/agtx task/review' --auto-approve --plugin-dir .agtx/omp-plugin --continue"
+        );
+    }
+
+    #[test]
     fn fixed_model_wins_over_dynamic_model() {
         let base = super::super::get_agent("omp").unwrap();
         let fixed =
